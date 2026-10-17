@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { FAMILIES, FAMILY_LIST } from "../src/lib/bench/cases";
-import { decideGate, scoreOutputs, staticScreen } from "../src/lib/gate";
+import { decideGate, egressBlocked, scoreOutputs, staticScreen } from "../src/lib/gate";
 
 const ok = staticScreen("import re\ndef normalize(raw):\n    return raw.strip()\n");
 
@@ -69,4 +69,11 @@ test("benchmark is well formed: held-out never overlaps visible", () => {
     for (const h of FAMILIES[f].heldout) assert.equal(seen.has(h.input), false, `${f}: ${h.input} overlaps`);
     assert.equal(new Set(FAMILIES[f].field.map((c) => c.input)).size, FAMILIES[f].field.length);
   }
+});
+
+test("egress verdict fails closed: only an explicit REACHED counts as open", () => {
+  assert.equal(egressBlocked(1, ""), true); // request failed
+  assert.equal(egressBlocked(124, ""), true); // timeout
+  assert.equal(egressBlocked(0, ""), true); // ran but proved nothing
+  assert.equal(egressBlocked(0, "REACHED\n"), false); // internet reachable -> NOT blocked
 });

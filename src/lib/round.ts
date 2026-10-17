@@ -1,7 +1,7 @@
 // One improvement round: evaluate current tool -> propose -> screen -> score in sandbox -> gate.
 // Returns a verdict plus usage for the ledger. Promotion still needs a hash-bound human approval (not here).
 import { FAMILIES, type Family, sha256 } from "./bench/cases";
-import { decideGate, type GateDecision, type RunnerOutput, scoreOutputs, staticScreen } from "./gate";
+import { decideGate, egressBlocked, type GateDecision, type RunnerOutput, scoreOutputs, staticScreen } from "./gate";
 import { type Failure, propose } from "./gemini";
 import { RUNNER_PY } from "./sandbox/runnerSource";
 import { createSandbox, destroySandbox, exec, upload } from "./sandbox/client";
@@ -73,6 +73,13 @@ export async function runRound(opts: {
       emit({ type: "sandbox_created", id: sb.id, spawnMs: sb.spawnMs, egress: ["127.0.0.1"] });
     }
     await upload(sandboxId, "/workspace/runner.py", RUNNER_PY);
+
+    // Prove the egress lock from inside the sandbox before any model-written code runs. Fail closed.
+    const probe = await exec(sandboxId, "timeout", ["8", "python3", "-c", "import urllib.request;urllib.request.urlopen('https://example.com',timeout=4);print('REACHED')"]);
+    addExec(probe.execMs);
+    const blocked = egressBlocked(probe.exitCode, probe.stdout);
+    emit({ type: "egress_check", blocked, target: "https://example.com", detail: blocked ? "outbound request failed from inside the sandbox" : "outbound request SUCCEEDED" });
+    if (!blocked) throw new Error("egress is not blocked inside the sandbox; refusing to run candidate code");
 
     // 1) Evaluate the current tool. Visible failures go to the agent; held-out never does.
     const needHeld = !opts.currentHeldoutPass;

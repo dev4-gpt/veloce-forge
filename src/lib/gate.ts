@@ -90,3 +90,10 @@ export function decideGate(current: Standing, candidate: Standing, screen: Scree
   if (candidate.visibleCount < current.visibleCount) reasons.push("visible score dropped");
   return { passed: reasons.length === 0, reasons };
 }
+
+// ---- sandbox egress proof ----
+// The probe script prints "REACHED" only if an outbound HTTPS request succeeded. Anything else
+// (timeout, DNS failure, connection refused, crash) counts as blocked, which is the safe direction.
+export function egressBlocked(exitCode: number, stdout: string): boolean {
+  return !(exitCode === 0 && stdout.includes("REACHED"));
+}

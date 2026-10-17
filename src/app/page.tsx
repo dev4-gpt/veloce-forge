@@ -21,6 +21,7 @@ function describe(e: Ev): string {
     case "reserved": return `Reserved ${usd(e.capMicros)} before any sandbox exists`;
     case "refused": return `Refused: ${e.reason}. ${e.detail ?? ""}`;
     case "sandbox_created": return `Sandbox ${String(e.id).slice(0, 12)} created in ${Math.round(e.spawnMs)} ms. Egress allowlist: ${e.egress?.join(", ")} (outbound blocked)`;
+    case "egress_check": return e.blocked ? `Egress verified from inside the sandbox: a request to ${e.target} failed (blocked)` : `EGRESS NOT BLOCKED: ${e.detail}`;
     case "baseline": return `Current tool: ${e.visible}/${e.visibleTotal} feedback cases, held-out ${e.heldout}/${e.heldoutTotal}`;
     case "visible_failures": return `${e.count} failing feedback case(s) shown to the agent (held-out cases are never shown)`;
     case "candidate": return `Candidate ${e.attempt} from ${e.model}: ${e.rationale}`;
@@ -144,6 +145,27 @@ export default function Home() {
       </header>
 
       {notice && <div className="mb-4 rounded-md border border-indigo-200 bg-indigo-50 px-3 py-2 text-sm text-indigo-900 dark:border-indigo-900 dark:bg-indigo-950 dark:text-indigo-100">{notice}</div>}
+
+      <section className="mb-4 rounded-lg border border-zinc-200 p-3 text-xs dark:border-zinc-800" aria-label="Pillar coverage">
+        <div className="mb-2 font-medium text-sm">Six pillars of the Veloce AgenticOS workspace: what this demo actually covers</div>
+        <div className="grid gap-2 sm:grid-cols-3 lg:grid-cols-6">
+          {[
+            ["Command", "not built", "no trusted score yet"],
+            ["Context", "not built", "needs real feedback ingestion"],
+            ["Orchestrate", "thin", "fixed round loop only"],
+            ["Create", "live", "agent writes and tests tools"],
+            ["Govern", "live", "gate, budget, hash-bound approval"],
+            ["Deliver", "not built", "no real outbound delivery"],
+          ].map(([name, status, note]) => (
+            <div key={name} className="rounded border border-zinc-200 p-2 dark:border-zinc-800">
+              <div className="font-medium">{name}</div>
+              <div className={status === "live" ? "text-emerald-600" : status === "thin" ? "text-amber-600" : "text-zinc-500"}>{status}</div>
+              <div className="text-zinc-500">{note}</div>
+            </div>
+          ))}
+        </div>
+        <div className="mt-2 text-zinc-500">One self-improving loop is implemented and tested. Per-pillar agents are future work, not shown here.</div>
+      </section>
 
       <section className="grid gap-4 md:grid-cols-3">
         {state?.families.map((f) => {
