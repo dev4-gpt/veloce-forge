@@ -28,6 +28,8 @@ export async function POST(req: Request) {
   const stream = new ReadableStream({
     async start(controller) {
       const send = (e: RoundEvent) => controller.enqueue(enc.encode(JSON.stringify(e) + "\n"));
+      let reserved = false;
+      let settledOrBlocked = false;
       try {
         // I1: authorise and reserve BEFORE any sandbox exists.
         const ok = await reserve(roundId, ROUND_CAP_MICROS);
@@ -35,6 +37,7 @@ export async function POST(req: Request) {
           send({ type: "refused", reason: "insufficient_funds", detail: "Add credits first. No sandbox was created." });
           return;
         }
+        reserved = true;
         send({ type: "reserved", roundId, capMicros: ROUND_CAP_MICROS });
         await startRoundRow(roundId, family);
         const active = await getActive(family);
@@ -60,6 +63,7 @@ export async function POST(req: Request) {
           status = "blocked_unsettled";
           toolStatus = "blocked";
           await markBlocked(roundId, ROUND_CAP_MICROS, "usage unknown; reservation stays held");
+          settledOrBlocked = true;
           send({ type: "blocked_unsettled", reason: "usage figure missing; hold kept; round cannot succeed" });
         } else {
           const actual = priceMicros({ tokensIn: result.usage.tokensIn!, tokensOut: result.usage.tokensOut!, execMs: result.usage.execMs! });
@@ -69,8 +73,10 @@ export async function POST(req: Request) {
             status = "blocked_unsettled";
             toolStatus = "blocked";
             await markBlocked(roundId, ROUND_CAP_MICROS, "settlement failed");
+            settledOrBlocked = true;
             send({ type: "blocked_unsettled", reason: "settlement failed (overrun or duplicate)" });
           } else {
+            settledOrBlocked = true;
             send({ type: "settled", actualMicros: actual, releasedMicros: ROUND_CAP_MICROS - actual });
           }
         }
@@ -86,7 +92,10 @@ export async function POST(req: Request) {
         }
         await finishRoundRow(roundId, status, result.usage);
       } catch (e) {
-        send({ type: "error", message: e instanceof Error ? e.message : String(e) });
+        const message = e instanceof Error ? e.message : String(e);
+        // A failed round must never look free: keep the hold and say why in the ledger.
+        if (reserved && !settledOrBlocked) await markBlocked(roundId, ROUND_CAP_MICROS, `round failed: ${message.slice(0, 120)}`).catch(() => {});
+        send({ type: "error", message });
         await finishRoundRow(roundId, "error", {}).catch(() => {});
       } finally {
         controller.close();

@@ -52,11 +52,11 @@ export async function credit(idemKey: string, amountMicros: number, note: string
 export async function reserve(roundId: string, cap: number): Promise<boolean> {
   const r = (await sql()`
     with w as (
-      update wallet set balance_micros = balance_micros - ${cap}, held_micros = held_micros + ${cap}
-      where id = 1 and balance_micros >= ${cap} returning 1),
+      update wallet set balance_micros = balance_micros - ${cap}::bigint, held_micros = held_micros + ${cap}::bigint
+      where id = 1 and balance_micros >= ${cap}::bigint returning 1),
     l as (
       insert into ledger(kind, amount_micros, round_id, idem_key)
-      select 'reserve', ${cap}, ${roundId}, ${"reserve:" + roundId} from w returning id)
+      select 'reserve', ${cap}::bigint, ${roundId}, ${"reserve:" + roundId} from w returning id)
     select (select count(*) from w) as ok`) as any[];
   return Number(r[0]?.ok ?? 0) > 0;
 }
@@ -64,15 +64,16 @@ export async function reserve(roundId: string, cap: number): Promise<boolean> {
 /** Settle actual usage (<= cap) and release the remainder. Idempotent per round. */
 export async function settle(roundId: string, cap: number, actual: number): Promise<boolean> {
   if (actual > cap) return false; // overrun is a blocked outcome, never clipped
+  const released = cap - actual;
   const r = (await sql()`
     with s as (
-      insert into ledger(kind, amount_micros, round_id, idem_key) values ('settle', ${actual}, ${roundId}, ${"settle:" + roundId})
+      insert into ledger(kind, amount_micros, round_id, idem_key) values ('settle', ${actual}::bigint, ${roundId}, ${"settle:" + roundId})
       on conflict (idem_key) do nothing returning 1),
     rel as (
       insert into ledger(kind, amount_micros, round_id, idem_key)
-      select 'release', ${cap - actual}, ${roundId}, ${"release:" + roundId} from s returning 1)
-    update wallet set held_micros = held_micros - ${cap} * (select count(*) from s),
-                      balance_micros = balance_micros + (${cap} - ${actual}) * (select count(*) from s)
+      select 'release', ${released}::bigint, ${roundId}, ${"release:" + roundId} from s returning 1)
+    update wallet set held_micros = held_micros - ${cap}::bigint * (select count(*) from s),
+                      balance_micros = balance_micros + ${released}::bigint * (select count(*) from s)
     where id = 1 returning (select count(*) from s) as done`) as any[];
   return Number(r[0]?.done ?? 0) > 0;
 }
