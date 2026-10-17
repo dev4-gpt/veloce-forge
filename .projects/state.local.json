@@ -1,0 +1,85 @@
+{
+  "version": 4,
+  "project": {
+    "catalog": "prod",
+    "initializedAt": "2026-10-17T21:35:17.439Z",
+    "merchantDisplayName": null,
+    "merchantId": "acct_1Tm8G4Fp2UBeFuLC",
+    "projectId": "project_61Vb3DRWVgrHmUhMK16UvWDQKMSQRXE2WiXPd88Iy6S8",
+    "projectName": "veloce-forge"
+  },
+  "providers": {
+    "neon": {
+      "accountRequestId": "facctrq_61Vb3FMO8H2n439rs16UvWDQKMSQRXE2WiXPd88IyXjk",
+      "configuration": {},
+      "linkedAt": "2026-10-17T21:37:17.660Z",
+      "providerId": "prvdr_61UH8uNXFdoJUJOtT54AC",
+      "providerName": "Neon",
+      "redirectUrl": null,
+      "requestedAt": "2026-10-17T21:37:17.660Z",
+      "status": "complete"
+    },
+    "vercel": {
+      "accountRequestId": "facctrq_61Vb3GHbzVbOONwrO16UvWDQKMSQRXE2WiXPd88IyQO8",
+      "configuration": {},
+      "linkedAt": "2026-10-17T21:38:16.527Z",
+      "providerId": "prvdr_61ULUAr4zlQgZkvXY5LsG",
+      "providerName": "Vercel",
+      "redirectUrl": null,
+      "requestedAt": "2026-10-17T21:38:16.527Z",
+      "status": "complete"
+    }
+  },
+  "resources": {
+    "neon-plan": {
+      "configuration": {},
+      "createdAt": "2026-10-17T21:37:19.337Z",
+      "lastRevealedAt": "2026-10-17T21:37:19.683Z",
+      "lastStatus": "complete",
+      "livemode": true,
+      "name": "neon-plan",
+      "providerId": "prvdr_61UH8uNXFdoJUJOtT54AC",
+      "providerName": "Neon",
+      "resourceId": "fres_61Vb3FOrzDqdRsLhu16UvWDQKMSQRXE2WiXPd88IyNYu",
+      "serviceId": "free"
+    },
+    "neon-postgres": {
+      "configuration": {},
+      "createdAt": "2026-10-17T21:37:21.806Z",
+      "lastRevealedAt": "2026-10-17T21:37:22.188Z",
+      "lastStatus": "complete",
+      "livemode": true,
+      "name": "neon-postgres",
+      "providerId": "prvdr_61UH8uNXFdoJUJOtT54AC",
+      "providerName": "Neon",
+      "resourceId": "fres_61Vb3FQcyAe84fYE116UvWDQKMSQRXE2WiXPd88IyE7k",
+      "serviceId": "postgres"
+    },
+    "vercel-plan": {
+      "configuration": {},
+      "createdAt": "2026-10-17T21:38:18.879Z",
+      "lastRevealedAt": "2026-10-17T21:38:19.454Z",
+      "lastStatus": "complete",
+      "livemode": true,
+      "name": "vercel-plan",
+      "providerId": "prvdr_61ULUAr4zlQgZkvXY5LsG",
+      "providerName": "Vercel",
+      "resourceId": "fres_61Vb3GL3iY1Fg9Yb616UvWDQKMSQRXE2WiXPd88Iy0a0",
+      "serviceId": "hobby"
+    },
+    "vercel-project": {
+      "configuration": {
+        "name": "veloce-forge"
+      },
+      "createdAt": "2026-10-17T21:38:21.855Z",
+      "lastRevealedAt": "2026-10-17T23:08:16.099Z",
+      "lastStatus": "complete",
+      "livemode": true,
+      "name": "vercel-project",
+      "providerId": "prvdr_61ULUAr4zlQgZkvXY5LsG",
+      "providerName": "Vercel",
+      "resourceId": "fres_61Vb3GO8YGe7eEMAQ16UvWDQKMSQRXE2WiXPd88IyMeu",
+      "serviceId": "project"
+    }
+  }
+}
