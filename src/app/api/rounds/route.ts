@@ -30,8 +30,12 @@ export async function POST(req: Request) {
   const enc = new TextEncoder();
   const stream = new ReadableStream({
     async start(controller) {
-      const send = (e: RoundEvent) => controller.enqueue(enc.encode(JSON.stringify(e) + "\n"));
+      const send = (e: RoundEvent) => {
+        if (e.type === "sandbox_created") sandboxStarted = true;
+        controller.enqueue(enc.encode(JSON.stringify(e) + "\n"));
+      };
       let reserved = false;
+      let sandboxStarted = false;
       let settledOrBlocked = false;
       try {
         // I1: authorise and reserve BEFORE any sandbox exists.
@@ -97,7 +101,15 @@ export async function POST(req: Request) {
       } catch (e) {
         const message = e instanceof Error ? e.message : String(e);
         // A failed round must never look free: keep the hold and say why in the ledger.
-        if (reserved && !settledOrBlocked) await markBlocked(roundId, ROUND_CAP_MICROS, `round failed: ${message.slice(0, 120)}`).catch(() => {});
+        if (reserved && !settledOrBlocked) {
+          if (!sandboxStarted) {
+            // Failed before any sandbox or model call: usage is KNOWN to be zero (not unknown), so release the whole hold.
+            await settle(roundId, ROUND_CAP_MICROS, 0).catch(() => {});
+            send({ type: "released", reason: "round failed before any sandbox ran; nothing was used" });
+          } else {
+            await markBlocked(roundId, ROUND_CAP_MICROS, `round failed: ${message.slice(0, 120)}`).catch(() => {});
+          }
+        }
         send({ type: "error", message });
         await finishRoundRow(roundId, "error", {}).catch(() => {});
       } finally {

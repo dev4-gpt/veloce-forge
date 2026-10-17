@@ -29,6 +29,7 @@ function describe(e: Ev): string {
     case "gate": return e.passed ? `Gate ${e.attempt}: PASSED. Waiting for human approval` : `Gate ${e.attempt}: REJECTED. ${(e.reasons as string[]).join("; ")}`;
     case "settled": return `Settled ${usd(e.actualMicros)}; released ${usd(e.releasedMicros)}`;
     case "blocked_unsettled": return `BLOCKED: ${e.reason}`;
+    case "released": return `Hold released: ${e.reason}`;
     case "sandbox_destroyed": return `Sandbox destroyed`;
     case "result": return `Round result: ${e.status}`;
     case "error": return `Error: ${e.message}`;
