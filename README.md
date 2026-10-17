@@ -42,7 +42,7 @@ Benchmark: three synthetic "messy field" normalizers (dates to ISO, money to cen
 
 ## Model providers (no single point of failure)
 
-The proposer tries providers in order and falls back on rate limits or errors: **Gemini**, then **OpenRouter**, **NVIDIA NIM** and **GitHub Models** (all OpenAI-compatible). A provider is used only if both its key and model env vars are set; model ids are never hardcoded. Set `LLM_PROVIDERS` to change the order. Free tiers have rate limits, can change, and may use prompts for training, so use them only with synthetic data (as here), never with client data. Missing usage figures from any provider are treated as unknown, not zero. Tests: `npx tsx --test tests/llm.test.ts`.
+The proposer tries providers in order and falls back on rate limits or errors: **Gemini**, then **OpenRouter** and **NVIDIA NIM** (OpenAI-compatible). GitHub Models was removed after research found it retired on 2026-07-30. A provider is used only if both its key and model env vars are set; model ids are never hardcoded. Set `LLM_PROVIDERS` to change the order. Free tiers have rate limits, can change, and may use prompts for training, so use them only with synthetic data (as here), never with client data. Missing usage figures from any provider are treated as unknown, not zero. Tests: `npx tsx --test tests/llm.test.ts`.
 
 ## Run it
 

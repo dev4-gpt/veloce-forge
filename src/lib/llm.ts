@@ -1,7 +1,8 @@
 // Provider-agnostic JSON completion with ordered fallback, so the agent never depends on a single free tier.
-// Order comes from LLM_PROVIDERS (default: gemini,openrouter,nvidia,github). A provider is used only if its key AND
+// Order comes from LLM_PROVIDERS (default: gemini,openrouter,nvidia). A provider is used only if its key AND
 // model are configured. Model ids are never hardcoded here: pick them from each provider's dashboard.
 // Free tiers change and may use prompts for training: use only with synthetic or non-sensitive data.
+// GitHub Models was removed: GitHub's docs report it retired on 2026-07-30 (found in research; re-verify before re-adding).
 
 export interface Completion {
   text: string;
@@ -22,11 +23,10 @@ interface OpenAICompat {
 const OPENAI_COMPAT: Record<string, OpenAICompat> = {
   openrouter: { name: "openrouter", baseUrl: "https://openrouter.ai/api/v1", keyEnv: "OPENROUTER_API_KEY", modelEnv: "OPENROUTER_MODEL" },
   nvidia: { name: "nvidia", baseUrl: "https://integrate.api.nvidia.com/v1", keyEnv: "NVIDIA_API_KEY", modelEnv: "NVIDIA_MODEL" },
-  github: { name: "github", baseUrl: "https://models.github.ai/inference", keyEnv: "GITHUB_MODELS_TOKEN", modelEnv: "GITHUB_MODELS_MODEL" },
 };
 
 export function configuredProviders(env: NodeJS.ProcessEnv = process.env): string[] {
-  const order = (env.LLM_PROVIDERS || "gemini,openrouter,nvidia,github").split(",").map((s) => s.trim()).filter(Boolean);
+  const order = (env.LLM_PROVIDERS || "gemini,openrouter,nvidia").split(",").map((s) => s.trim()).filter(Boolean);
   return order.filter((p) => {
     if (p === "gemini") return Boolean(env.GEMINI_API_KEY);
     const c = OPENAI_COMPAT[p];
