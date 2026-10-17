@@ -34,7 +34,11 @@ export async function getWallet(): Promise<{ balance: number; held: number }> {
 }
 
 /** Credit the wallet exactly once per idempotency key (Stripe session id). Returns false if already credited. */
+export const LIFETIME_TOPUP_CAP_MICROS = 20_000_000; // $20 of test credits in total: a public demo must not let anyone burn the model/sandbox quota
+
 export async function credit(idemKey: string, amountMicros: number, note: string): Promise<boolean> {
+  const total = (await sql()`select coalesce(sum(amount_micros), 0) as t from ledger where kind = 'topup' and idem_key <> ${idemKey}`) as any[];
+  if (Number(total[0].t) + amountMicros > LIFETIME_TOPUP_CAP_MICROS) return false;
   const r = (await sql()`
     with ins as (
       insert into ledger(kind, amount_micros, idem_key, note) values ('topup', ${amountMicros}, ${idemKey}, ${note})
