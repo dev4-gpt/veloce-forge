@@ -69,6 +69,13 @@ export default function Home() {
     else setNotice(j.error ?? "Could not start Checkout");
   }
 
+  async function demoCredits() {
+    const r = await fetch("/api/topup/demo", { method: "POST" });
+    const j = await r.json();
+    setNotice(j.credited ? "Added $5 of demo credits (not a payment)." : "Demo credits were already claimed today, or the lifetime cap is reached.");
+    refresh();
+  }
+
   async function replay() {
     const r = await fetch("/api/webhook/replay", { method: "POST" });
     const j = await r.json();
@@ -123,7 +130,8 @@ export default function Home() {
         <div className="flex items-center gap-3 rounded-lg border border-zinc-200 px-4 py-2 text-sm dark:border-zinc-800">
           <div><div className="text-xs text-zinc-500">Balance</div><div className="font-mono text-base">{state ? usd(state.wallet.balance) : "…"}</div></div>
           <div><div className="text-xs text-zinc-500">Held</div><div className="font-mono text-base">{state ? usd(state.wallet.held) : "…"}</div></div>
-          <button onClick={topup} className="rounded-md bg-indigo-600 px-3 py-1.5 text-white hover:bg-indigo-500">Add $5 credits</button>
+          <button onClick={topup} className="rounded-md bg-indigo-600 px-3 py-1.5 text-white hover:bg-indigo-500" title="Stripe Checkout in test mode; no real charge">Add $5 credits (Stripe test)</button>
+          <button onClick={demoCredits} className="rounded-md border border-zinc-300 px-3 py-1.5 hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-900" title="No card. Labelled demo credits, once per day, not a payment.">Claim $5 demo credits</button>
           <button onClick={replay} className="rounded-md border border-zinc-300 px-3 py-1.5 hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-900" title="Re-deliver the last Stripe payment event. It must be ignored.">Replay webhook</button>
         </div>
       </header>
