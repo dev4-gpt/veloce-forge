@@ -40,6 +40,10 @@ Benchmark: three synthetic "messy field" normalizers (dates to ISO, money to cen
 - **CreateOS Sandbox** runs all untrusted, model-written code: create, upload, exec with stdin, egress allowlist, destroy. See `scripts/smoke-sandbox.mjs`.
 - **Honest limits:** the API has no deny-all egress value (an empty list means allow-all), so a one-entry allowlist (`127.0.0.1`) is used to block outbound traffic; this was verified. **Sandbox fork was attempted but refused by the free plan's concurrency quota** (1 concurrent sandbox), so fork is not used in the demo. The wallet and tool library live in Neon Postgres, provisioned through Stripe Projects.
 
+## Model providers (no single point of failure)
+
+The proposer tries providers in order and falls back on rate limits or errors: **Gemini**, then **OpenRouter**, **NVIDIA NIM** and **GitHub Models** (all OpenAI-compatible). A provider is used only if both its key and model env vars are set; model ids are never hardcoded. Set `LLM_PROVIDERS` to change the order. Free tiers have rate limits, can change, and may use prompts for training, so use them only with synthetic data (as here), never with client data. Missing usage figures from any provider are treated as unknown, not zero. Tests: `npx tsx --test tests/llm.test.ts`.
+
 ## Run it
 
 ```bash
