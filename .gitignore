@@ -32,6 +32,10 @@ yarn-error.log*
 next-env.d.ts
 .projects/state.local.json
 
+
+# local agent-tooling state
+.claude-flow/
+
 .projects/cache
 .projects/vault
 .projects/state.test.json
@@ -39,6 +43,3 @@ next-env.d.ts
 .env
 .env.*
 !.env.example
-
-# local agent-tooling state
-.claude-flow/

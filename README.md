@@ -63,6 +63,10 @@ The author's earlier project, **Veloce AgenticOS** (a governed AI workspace), is
 
 ## Limitations
 
+- **Demo access control:** viewing is open, but running rounds, approving tools, claiming demo credits and replaying the webhook need a shared demo passcode (`DEMO_PASSCODE`, fails closed if unset). This is a hackathon-grade shared secret, not real authentication, and there is no reviewer identity.
+- **The held-out cases are public:** they live in `src/lib/bench/cases.ts`, so the held-out score is demo-grade, not evidence of generalisation. A real deployment would keep them private and rotate them.
+- Test coverage is limited to the gate, provider fallback and passcode check (mocked network). The database layer, routes, Stripe paths and sandbox client were exercised live but have no automated tests.
+
 - Small synthetic benchmark; not evidence of general self-improvement.
 - Demo cost rates are made-up constants, not real pricing.
 - Single demo tenant; no real authentication.

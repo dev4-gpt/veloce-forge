@@ -40,11 +40,17 @@ export default function Home() {
   const [events, setEvents] = useState<Ev[]>([]);
   const [running, setRunning] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const [passcode, setPasscode] = useState("");
   const timeline = useRef<HTMLDivElement>(null);
+  const authHeaders = (): Record<string, string> => (passcode ? { "x-demo-passcode": passcode } : {});
 
   const refresh = useCallback(async () => {
     const r = await fetch("/api/state", { cache: "no-store" });
     if (r.ok) setState(await r.json());
+  }, []);
+
+  useEffect(() => {
+    try { setPasscode(sessionStorage.getItem("forge-passcode") ?? ""); } catch {}
   }, []);
 
   useEffect(() => {
@@ -70,14 +76,14 @@ export default function Home() {
   }
 
   async function demoCredits() {
-    const r = await fetch("/api/topup/demo", { method: "POST" });
+    const r = await fetch("/api/topup/demo", { method: "POST", headers: authHeaders() });
     const j = await r.json();
-    setNotice(j.credited ? "Added $5 of demo credits (not a payment)." : "Demo credits were already claimed today, or the lifetime cap is reached.");
+    setNotice(!r.ok ? (j.error ?? "Not allowed") : j.credited ? "Added $5 of demo credits (not a payment)." : "Demo credits were already claimed today, or the lifetime cap is reached.");
     refresh();
   }
 
   async function replay() {
-    const r = await fetch("/api/webhook/replay", { method: "POST" });
+    const r = await fetch("/api/webhook/replay", { method: "POST", headers: authHeaders() });
     const j = await r.json();
     setNotice(r.ok ? (j.credited ? "Replay credited again (unexpected!)" : `Replayed webhook: duplicate ignored, balance unchanged at ${usd(j.balanceAfter)}.`) : j.error);
     refresh();
@@ -88,7 +94,7 @@ export default function Home() {
     setEvents([]);
     setNotice(null);
     try {
-      const res = await fetch("/api/rounds", { method: "POST", body: JSON.stringify({ family, ...opts }) });
+      const res = await fetch("/api/rounds", { method: "POST", headers: authHeaders(), body: JSON.stringify({ family, ...opts }) });
       if (!res.ok || !res.body) {
         const j = await res.json().catch(() => ({}));
         setEvents([{ type: "error", message: j.error ?? `HTTP ${res.status}` }]);
@@ -112,7 +118,7 @@ export default function Home() {
   }
 
   async function reviewTool(id: string, sha: string, decision: "approve" | "reject") {
-    const r = await fetch(`/api/tools/${id}/review`, { method: "POST", body: JSON.stringify({ decision, sha }) });
+    const r = await fetch(`/api/tools/${id}/review`, { method: "POST", headers: authHeaders(), body: JSON.stringify({ decision, sha }) });
     const j = await r.json();
     setNotice(r.ok ? (decision === "approve" ? "Approved and promoted. The library now uses this version." : "Rejected.") : `Review refused: ${j.error}`);
     refresh();
@@ -127,9 +133,10 @@ export default function Home() {
           <h1 className="text-2xl font-semibold tracking-tight">Veloce Forge</h1>
           <p className="text-sm text-zinc-500">Self-improving agents that cannot promote themselves. Test mode · synthetic data · built for CreateOS × Stripe Projects.</p>
         </div>
-        <div className="flex items-center gap-3 rounded-lg border border-zinc-200 px-4 py-2 text-sm dark:border-zinc-800">
+        <div className="flex flex-wrap items-center gap-3 rounded-lg border border-zinc-200 px-4 py-2 text-sm dark:border-zinc-800">
           <div><div className="text-xs text-zinc-500">Balance</div><div className="font-mono text-base">{state ? usd(state.wallet.balance) : "…"}</div></div>
           <div><div className="text-xs text-zinc-500">Held</div><div className="font-mono text-base">{state ? usd(state.wallet.held) : "…"}</div></div>
+          <input type="password" value={passcode} onChange={(e) => { setPasscode(e.target.value); try { sessionStorage.setItem("forge-passcode", e.target.value); } catch {} }} placeholder="demo passcode" aria-label="Demo passcode" className="w-32 rounded-md border border-zinc-300 bg-transparent px-2 py-1.5 text-sm dark:border-zinc-700" title="Needed to run rounds, approve tools, or claim demo credits. Viewing is open." />
           <button onClick={topup} className="rounded-md bg-indigo-600 px-3 py-1.5 text-white hover:bg-indigo-500" title="Stripe Checkout in test mode; no real charge">Add $5 credits (Stripe test)</button>
           <button onClick={demoCredits} className="rounded-md border border-zinc-300 px-3 py-1.5 hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-900" title="No card. Labelled demo credits, once per day, not a payment.">Claim $5 demo credits</button>
           <button onClick={replay} className="rounded-md border border-zinc-300 px-3 py-1.5 hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-900" title="Re-deliver the last Stripe payment event. It must be ignored.">Replay webhook</button>

@@ -6,6 +6,7 @@ import {
   setActiveHeldout, settle, startRoundRow,
 } from "@/lib/db";
 import { runRound, type RoundEvent } from "@/lib/round";
+import { requirePasscode } from "@/lib/auth";
 
 export const maxDuration = 300;
 
@@ -16,6 +17,8 @@ function cheatCode(family: Family): string {
 }
 
 export async function POST(req: Request) {
+  const denied = requirePasscode(req);
+  if (denied) return denied;
   const body = (await req.json().catch(() => ({}))) as { family?: Family; cheat?: boolean; simulateMissingUsage?: boolean };
   const family = body.family;
   if (!family || !FAMILIES[family]) return Response.json({ error: "family must be dates, money or durations" }, { status: 400 });
@@ -55,7 +58,7 @@ export async function POST(req: Request) {
         if (!active.heldout_pass) await setActiveHeldout(active.id, result.currentHeldoutPass, result.currentVisibleCount);
 
         // I2: a simulated or real missing usage figure is never priced as zero.
-        const unknown = result.usage.unknown || body.simulateMissingUsage === true;
+        const unknown = result.usage.unknown || body.simulateMissingUsage === true; // operator-only demo flag: the route above already requires the passcode
         let status: string = result.verdict;
         let toolStatus: "proposed" | "rejected" | "blocked" = result.verdict === "proposed" ? "proposed" : "rejected";
 

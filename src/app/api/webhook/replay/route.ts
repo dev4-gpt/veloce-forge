@@ -1,8 +1,11 @@
 import { credit, ensureSchema, getWallet, latestTopupKey } from "@/lib/db";
+import { requirePasscode } from "@/lib/auth";
 
 
 // Demo button (I5): re-deliver the latest top-up through the same credit path. A replay must be a no-op.
-export async function POST() {
+export async function POST(req: Request) {
+  const denied = requirePasscode(req);
+  if (denied) return denied;
   await ensureSchema();
   const last = await latestTopupKey();
   if (!last) return Response.json({ error: "no top-up to replay yet" }, { status: 404 });
