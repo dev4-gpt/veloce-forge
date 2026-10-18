@@ -67,6 +67,10 @@ node scripts/verify-report.mjs evidence.json --pubkey <base64 public key> --head
 
 It detects edited, removed or reordered entries, forged signatures (when you pin the key), approvals that do not match the code a round produced, and promotions whose own recorded numbers break the gate. It does **not** prove that the sandbox really ran or that the scores are true, and without a pinned key or a saved head hash it cannot catch someone who rewrites or truncates the whole chain. Rounds before this feature have no entries. If recording a report fails, the round still completes and the UI shows a warning.
 
+## Replay of recorded runs
+
+Each finished round's event stream is stored (`round_events`, immutable) and its digest is sealed into that round's chain entry. The timeline panel can replay any recorded run with its original pacing (long silences shortened) without a passcode, a sandbox, a model call or any money: replay is read-only code that cannot reach the wallet, and every replayed line is tagged `replay: true` and shown with a violet "replay" badge and a banner. The replay header says whether the stored events still match the sealed report. Limits: only rounds run after this feature existed are recorded (older rounds show as history cards only), and the seal shows the stream was not edited afterwards, not that the original live run was honest.
+
 ## Prior work and attribution
 
 The author's earlier project, **Veloce AgenticOS** (a governed AI workspace), is prior work and inspired the invariants above (budget reservation and settlement, hash-bound approval). **No Veloce code was copied into this repository; everything here was written during the hackathon.** This project is not affiliated with CreateOS, Stripe or Google. Third-party: CreateOS Sandbox REST API, Stripe (test mode), Neon, Vercel, Gemini API, Next.js, `@neondatabase/serverless`, `stripe`, `tsx`.

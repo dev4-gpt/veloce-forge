@@ -57,6 +57,7 @@ export interface RoundBody {
   usage: { tokensIn: number | null; tokensOut: number | null; execMs: number | null };
   costMicros: number | null; // null when the usage figure was unknown (never recorded as zero)
   settlement: "settled" | "blocked_unsettled" | "released";
+  eventsSha?: string | null; // digest of the stored event stream used for replay (see replay.ts); null/absent = not recorded
   at: string; // server clock; not independently attested
 }
 

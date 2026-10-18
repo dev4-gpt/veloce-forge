@@ -42,6 +42,9 @@ export async function ensureSchema() {
   await q`create table if not exists report_chain (seq bigint primary key, prev text not null, body_json text not null, hash text not null unique, sig text, kid text, created_at timestamptz not null default now())`;
   await q`create or replace function report_chain_immutable() returns trigger as $f$ begin raise exception 'report_chain is append-only'; end $f$ language plpgsql`;
   await q`do $d$ begin if not exists (select 1 from pg_trigger where tgname = 'report_chain_no_change') then create trigger report_chain_no_change before update or delete on report_chain for each row execute function report_chain_immutable(); end if; end $d$`;
+  // Recorded event streams for replay (see replay.ts). Immutable like the chain; their digest is sealed into the round's chain entry.
+  await q`create table if not exists round_events (round_id text primary key, family text not null, status text not null, events_json text not null, digest text not null, created_at timestamptz not null default now())`;
+  await q`do $d$ begin if not exists (select 1 from pg_trigger where tgname = 'round_events_no_change') then create trigger round_events_no_change before update or delete on round_events for each row execute function report_chain_immutable(); end if; end $d$`;
   schemaReady = true;
 }
 

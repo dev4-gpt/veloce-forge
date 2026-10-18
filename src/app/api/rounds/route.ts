@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { FAMILIES, type Family, PARTNER, sha256 } from "@/lib/bench/cases";
 import { appendReport } from "@/lib/chainStore";
 import { summariseEvents, type RoundBody } from "@/lib/evidence";
+import { saveRoundEvents, type TimedEvent } from "@/lib/replay";
 import { priceMicros, ROUND_CAP_MICROS } from "@/lib/cost";
 import {
   ensureSchema, finishRoundRow, getActive, getHeldoutSet, insertTool, markBlocked, nextVersion, reserve,
@@ -34,8 +35,11 @@ export async function POST(req: Request) {
   const stream = new ReadableStream({
     async start(controller) {
       const events: Record<string, unknown>[] = [];
+      const timed: TimedEvent[] = []; // the same stream with timestamps, stored for replay
+      const t0 = Date.now();
       const send = (e: RoundEvent) => {
         events.push(e as Record<string, unknown>);
+        timed.push({ t: Date.now() - t0, e: e as Record<string, unknown> });
         if (e.type === "sandbox_created") sandboxStarted = true;
         controller.enqueue(enc.encode(JSON.stringify(e) + "\n"));
       };
@@ -50,13 +54,22 @@ export async function POST(req: Request) {
         if (recorded) return;
         recorded = true;
         try {
+          // Store the stream first so its digest can be sealed into the chain entry. If storing fails the round is still
+          // reported (eventsSha null) and the client is told that replay will not be available.
+          const snapshot = timed.slice(0, timed.length);
+          let eventsSha: string | null = null;
+          try {
+            eventsSha = await saveRoundEvents(roundId, family, extra.status, snapshot);
+          } catch (err) {
+            send({ type: "report_error", message: "events not stored, so this round cannot be replayed: " + (err instanceof Error ? err.message : String(err)) });
+          }
           const facts = summariseEvents(events);
           const held = await getHeldoutSet(family).catch(() => null);
           const body: RoundBody = {
             kind: "round", roundId, family, pillar: FAMILIES[family].pillar, startedBy: auth.identity.id,
             toolId: null, candidate: null, visible: null, heldout: null, heldoutCommitment: held?.sha ?? null, cross: null, gate: null,
             egressBlocked: facts.egressBlocked, astOk: facts.astOk, sandboxId: facts.sandboxId,
-            usage: { tokensIn: null, tokensOut: null, execMs: null }, costMicros: null, settlement, at: new Date().toISOString(), ...extra,
+            usage: { tokensIn: null, tokensOut: null, execMs: null }, costMicros: null, settlement, eventsSha, at: new Date().toISOString(), ...extra,
           };
           const entry = await appendReport(body);
           send({ type: "report_sealed", seq: entry.seq, hash: entry.hash, signed: Boolean(entry.sig) });

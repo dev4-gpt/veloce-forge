@@ -35,6 +35,8 @@ function describe(e: Ev): string {
     case "released": return `Hold released: ${e.reason}`;
     case "report_sealed": return `Report sealed in the hash chain as #${e.seq} (${String(e.hash).slice(0, 12)}…, ${e.signed ? "signed" : "unsigned"})`;
     case "report_error": return `WARNING: the report could not be recorded (${e.message})`;
+    case "replay_start": return `${e.notice} Recorded ${String(e.recordedAt).slice(0, 19)} · round ${e.roundId} · ${e.family} · ${e.eventCount} events · ${e.integrity?.state === "matches_sealed_report" ? `events match sealed report #${e.integrity.seq}` : e.integrity?.state === "mismatch" ? `INTEGRITY FAILED: ${e.integrity.reason}` : `not sealed (${e.integrity?.reason})`}`;
+    case "replay_end": return `End of replay. This was a recording; nothing above ran just now.`;
     case "sandbox_destroyed": return `Sandbox destroyed`;
     case "result": return `Round result: ${e.status}`;
     case "error": return `Error: ${e.message}`;
@@ -48,12 +50,21 @@ export default function Home() {
   const [running, setRunning] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [passcode, setPasscode] = useState("");
+  const [recordings, setRecordings] = useState<{ roundId: string; family: string; status: string; recordedAt: string; eventCount: number }[]>([]);
+  const [pick, setPick] = useState("");
+  const [replaying, setReplaying] = useState(false);
   const timeline = useRef<HTMLDivElement>(null);
   const authHeaders = (): Record<string, string> => (passcode ? { "x-demo-passcode": passcode, "x-reviewer-token": passcode } : {});
 
   const refresh = useCallback(async () => {
     const r = await fetch("/api/state", { cache: "no-store" });
     if (r.ok) setState(await r.json());
+    const rr = await fetch("/api/replay", { cache: "no-store" }).catch(() => null);
+    if (rr?.ok) {
+      const list = (await rr.json()).recordings ?? [];
+      setRecordings(list);
+      setPick((p) => p || list[0]?.roundId || "");
+    }
   }, []);
 
   useEffect(() => {
@@ -124,6 +135,34 @@ export default function Home() {
     }
   }
 
+  // Plays a STORED stream back. It never calls /api/rounds, so no sandbox starts, no model is called and no money moves.
+  async function playRecording(roundId: string) {
+    setReplaying(true);
+    setEvents([]);
+    setNotice(null);
+    try {
+      const res = await fetch(`/api/replay/${encodeURIComponent(roundId)}`, { cache: "no-store" });
+      if (!res.ok || !res.body) {
+        const j = await res.json().catch(() => ({}));
+        setEvents([{ type: "error", message: j.error ?? `HTTP ${res.status}` }]);
+        return;
+      }
+      const reader = res.body.getReader();
+      const dec = new TextDecoder();
+      let buf = "";
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        const lines = buf.split("\n");
+        buf = lines.pop() ?? "";
+        for (const l of lines) if (l.trim()) setEvents((p) => [...p, JSON.parse(l)]);
+      }
+    } finally {
+      setReplaying(false);
+    }
+  }
+
   async function reviewTool(id: string, sha: string, decision: "approve" | "reject") {
     const r = await fetch(`/api/tools/${id}/review`, { method: "POST", headers: authHeaders(), body: JSON.stringify({ decision, sha }) });
     const j = await r.json();
@@ -132,6 +171,7 @@ export default function Home() {
   }
 
   const proposals = state?.families.flatMap((f) => f.history.filter((h) => h.status === "proposed").map((h) => ({ ...h, family: f.title }))) ?? [];
+  const isReplay = replaying || events.some((e) => e.replay === true);
 
   return (
     <main className="mx-auto w-full max-w-6xl px-4 py-6 sm:px-6">
@@ -207,11 +247,25 @@ export default function Home() {
 
       <section className="mt-6 grid gap-4 md:grid-cols-2">
         <div className="rounded-lg border border-zinc-200 p-4 dark:border-zinc-800">
-          <h2 className="mb-2 font-medium">Live timeline {running && <span className="ml-2 text-xs text-amber-600">running…</span>}</h2>
+          <h2 className="mb-2 font-medium">
+            {isReplay ? "Replay of a recorded run" : "Live timeline"}
+            {running && <span className="ml-2 text-xs text-amber-600">running…</span>}
+            {isReplay && <span className="ml-2 rounded bg-violet-600 px-1.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-white">replay · not live</span>}
+          </h2>
+          <div className="mb-2 flex flex-wrap items-center gap-2 text-xs">
+            <select value={pick} onChange={(e) => setPick(e.target.value)} disabled={recordings.length === 0 || replaying || running} className="max-w-[16rem] rounded border border-zinc-300 bg-transparent px-2 py-1 dark:border-zinc-700" aria-label="Recorded run to replay">
+              {recordings.length === 0 && <option value="">No recorded runs yet</option>}
+              {recordings.map((r) => <option key={r.roundId} value={r.roundId}>{r.family} · {r.status} · {r.recordedAt.slice(0, 16)} · {r.roundId}</option>)}
+            </select>
+            <button onClick={() => pick && playRecording(pick)} disabled={!pick || replaying || running} className="rounded border border-violet-600 px-3 py-1 text-violet-700 disabled:opacity-40 dark:text-violet-300">{replaying ? "Replaying…" : "Replay (no sandbox, no cost)"}</button>
+          </div>
           <div ref={timeline} className="max-h-96 space-y-1.5 overflow-auto font-mono text-xs">
             {events.length === 0 && <p className="text-zinc-500">Run a round to see each step: reserve, sandbox, candidate, scores, gate, settle.</p>}
             {events.map((e, i) => (
-              <div key={i} className={e.type === "gate" && !e.passed ? "text-rose-600" : e.type === "blocked_unsettled" || e.type === "error" || e.type === "refused" ? "text-rose-600" : e.type === "gate" ? "text-emerald-600" : ""}>• {describe(e)}</div>
+              <div key={i} className={e.replay ? "border-l-2 border-violet-500 pl-2 " : ""}>
+                {e.replay && <span className="mr-1 rounded bg-violet-100 px-1 text-[10px] font-semibold uppercase text-violet-800 dark:bg-violet-900/40 dark:text-violet-200">replay</span>}
+                <span className={e.type === "gate" && !e.passed ? "text-rose-600" : e.type === "blocked_unsettled" || e.type === "error" || e.type === "refused" ? "text-rose-600" : e.type === "gate" ? "text-emerald-600" : ""}>• {describe(e)}</span>
+              </div>
             ))}
           </div>
         </div>
