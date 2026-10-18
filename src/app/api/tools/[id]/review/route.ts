@@ -1,4 +1,5 @@
-import { ensureSchema, review } from "@/lib/db";
+import { appendReport } from "@/lib/chainStore";
+import { ensureSchema, getTool, review } from "@/lib/db";
 import { requireRole } from "@/lib/auth";
 
 
@@ -13,5 +14,18 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
   }
   await ensureSchema();
   const r = await review(id, body.decision, body.sha, auth.identity.id === "shared-passcode" ? null : auth.identity.id);
-  return Response.json(r, { status: r.ok ? 200 : 409 });
+  if (!r.ok) return Response.json(r, { status: 409 });
+  // Seal the decision into the tamper-evident chain. The decision itself is already committed; a failure to record is reported, not hidden.
+  let sealed: { seq: number; hash: string } | { error: string };
+  try {
+    const tool = await getTool(id);
+    const e = await appendReport({
+      kind: "decision", toolId: id, family: tool?.family ?? "unknown", decision: body.decision, shaAtDecision: body.sha,
+      reviewerId: auth.identity.id, at: new Date().toISOString(),
+    });
+    sealed = { seq: e.seq, hash: e.hash };
+  } catch (err) {
+    sealed = { error: err instanceof Error ? err.message : String(err) };
+  }
+  return Response.json({ ...r, sealed });
 }

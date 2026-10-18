@@ -38,6 +38,10 @@ export async function ensureSchema() {
   await q`alter table approvals add column if not exists reviewer_id text`;
   await q`alter table rounds add column if not exists started_by text`;
   await q`create unique index if not exists one_running_round on rounds ((1)) where status = 'running'`;
+  // Tamper-evident report chain (see evidence.ts). body_json is the canonical text that was hashed; rows are never updated or deleted.
+  await q`create table if not exists report_chain (seq bigint primary key, prev text not null, body_json text not null, hash text not null unique, sig text, kid text, created_at timestamptz not null default now())`;
+  await q`create or replace function report_chain_immutable() returns trigger as $f$ begin raise exception 'report_chain is append-only'; end $f$ language plpgsql`;
+  await q`do $d$ begin if not exists (select 1 from pg_trigger where tgname = 'report_chain_no_change') then create trigger report_chain_no_change before update or delete on report_chain for each row execute function report_chain_immutable(); end if; end $d$`;
   schemaReady = true;
 }
 

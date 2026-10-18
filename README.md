@@ -57,6 +57,16 @@ npx tsx --env-file=.env.local scripts/run-round.ts dates   # one real round from
 node --env-file=.env.local scripts/smoke-sandbox.mjs       # sandbox smoke test
 ```
 
+## Tamper-evident round reports
+
+Every round and every approval is appended to a hash chain (`report_chain`): each entry's hash covers its content and the previous hash, and can be Ed25519-signed (`REPORT_SIGNING_KEY`). Export it from `/api/evidence` (needs the passcode or a reviewer token) and check it offline, with a script that imports nothing from this repo:
+
+```bash
+node scripts/verify-report.mjs evidence.json --pubkey <base64 public key> --head <hash you saved last time>
+```
+
+It detects edited, removed or reordered entries, forged signatures (when you pin the key), approvals that do not match the code a round produced, and promotions whose own recorded numbers break the gate. It does **not** prove that the sandbox really ran or that the scores are true, and without a pinned key or a saved head hash it cannot catch someone who rewrites or truncates the whole chain. Rounds before this feature have no entries. If recording a report fails, the round still completes and the UI shows a warning.
+
 ## Prior work and attribution
 
 The author's earlier project, **Veloce AgenticOS** (a governed AI workspace), is prior work and inspired the invariants above (budget reservation and settlement, hash-bound approval). **No Veloce code was copied into this repository; everything here was written during the hackathon.** This project is not affiliated with CreateOS, Stripe or Google. Third-party: CreateOS Sandbox REST API, Stripe (test mode), Neon, Vercel, Gemini API, Next.js, `@neondatabase/serverless`, `stripe`, `tsx`.

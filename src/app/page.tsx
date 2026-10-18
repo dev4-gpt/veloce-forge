@@ -33,6 +33,8 @@ function describe(e: Ev): string {
     case "settled": return `Settled ${usd(e.actualMicros)}; released ${usd(e.releasedMicros)}`;
     case "blocked_unsettled": return `BLOCKED: ${e.reason}`;
     case "released": return `Hold released: ${e.reason}`;
+    case "report_sealed": return `Report sealed in the hash chain as #${e.seq} (${String(e.hash).slice(0, 12)}…, ${e.signed ? "signed" : "unsigned"})`;
+    case "report_error": return `WARNING: the report could not be recorded (${e.message})`;
     case "sandbox_destroyed": return `Sandbox destroyed`;
     case "result": return `Round result: ${e.status}`;
     case "error": return `Error: ${e.message}`;
