@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 type Hist = { id: string; version: number; status: string; heldout: number | null; visible: number | null; sha: string; rationale: string | null; gate: { passed: boolean; reasons: string[] } | null; code?: string };
-type Fam = { family: string; title: string; pillar: string; heldoutTotal: number; feedbackTotal: number; heldoutCommitment: string | null; activeId: string; activeVersion: number; activeHeldout: number | null; history: Hist[] };
+type Fam = { family: string; title: string; pillar: string; heldoutTotal: number; feedbackTotal: number; heldoutCommitment: string | null; crossCheck: { partner: string; total: number; commitment: string | null } | null; activeId: string; activeVersion: number; activeHeldout: number | null; history: Hist[] };
 type State = { wallet: { balance: number; held: number }; families: Fam[]; ledger: { id: number; kind: string; amount_micros: number; round_id: string | null; idem_key: string | null; note: string | null }[] };
 type Ev = { type: string; [k: string]: any };
 
@@ -22,6 +22,8 @@ function describe(e: Ev): string {
     case "refused": return `Refused: ${e.reason}. ${e.detail ?? ""}`;
     case "sandbox_created": return `Sandbox ${String(e.id).slice(0, 12)} created in ${Math.round(e.spawnMs)} ms. Egress allowlist: ${e.egress?.join(", ")} (outbound blocked)`;
     case "egress_check": return e.blocked ? `Egress verified from inside the sandbox: a request to ${e.target} failed (blocked)` : `EGRESS NOT BLOCKED: ${e.detail}`;
+    case "cross_baseline": return `Cross-pillar baseline with the active ${e.partner} tool: ${e.passing}/${e.total} sealed end-to-end cases pass`;
+    case "cross_check": return `Cross-pillar check ${e.attempt}: end-to-end ${e.candidate}/${e.total} with the candidate (was ${e.current}); a drop or any broken case blocks promotion`;
     case "baseline": return `Current tool: ${e.visible}/${e.visibleTotal} feedback cases, held-out ${e.heldout}/${e.heldoutTotal}`;
     case "visible_failures": return `${e.count} failing feedback case(s) shown to the agent (held-out cases are never shown)`;
     case "candidate": return `Candidate ${e.attempt} from ${e.model}: ${e.rationale}`;
@@ -181,6 +183,7 @@ export default function Home() {
               <div className="mt-1 h-2 rounded bg-zinc-100 dark:bg-zinc-800"><div className="h-2 rounded bg-emerald-500" style={{ width: `${pct}%` }} /></div>
               <div className="mt-1 font-mono text-sm">{f.activeHeldout === null ? "not measured yet" : `${f.activeHeldout}/${f.heldoutTotal}`}</div>
               <div className="mt-2 text-[11px] text-zinc-500" title={f.heldoutCommitment ?? undefined}>{f.heldoutCommitment ? `private held-out set, commitment sha256 ${f.heldoutCommitment.slice(0, 12)}…` : "held-out set not configured"}</div>
+              {f.crossCheck && <div className="mt-1 text-[11px] text-zinc-500">{f.crossCheck.commitment ? `sealed cross-pillar check with ${f.crossCheck.partner}: ${f.crossCheck.total} end-to-end cases` : "cross-pillar check not configured (rounds refuse to run)"}</div>}
               <ul className="mt-3 space-y-1 text-xs">
                 {f.history.slice(0, 4).map((h) => (
                   <li key={h.id} className="flex items-center justify-between gap-2">

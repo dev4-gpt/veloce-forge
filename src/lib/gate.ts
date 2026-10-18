@@ -80,7 +80,12 @@ export interface GateDecision {
   reasons: string[];
 }
 
-export function decideGate(current: Standing, candidate: Standing, screen: Screen): GateDecision {
+export interface CrossCheck {
+  currentPass: boolean[]; // sealed end-to-end set with the CURRENT tool of this pillar
+  candidatePass: boolean[]; // same set with the CANDIDATE swapped in (partner pillar unchanged)
+}
+
+export function decideGate(current: Standing, candidate: Standing, screen: Screen, cross?: CrossCheck): GateDecision {
   const reasons: string[] = [];
   if (!screen.ok) reasons.push(...screen.reasons.map((r) => `static screen: ${r}`));
   const curH = current.heldoutPass.filter(Boolean).length;
@@ -89,6 +94,13 @@ export function decideGate(current: Standing, candidate: Standing, screen: Scree
   const regressed = current.heldoutPass.flatMap((p, i) => (p && !candidate.heldoutPass[i] ? [i] : []));
   if (regressed.length) reasons.push(`regression on ${regressed.length} held-out case(s) the current tool passed`);
   if (candidate.visibleCount < current.visibleCount) reasons.push("visible score dropped");
+  if (cross) {
+    const cur = cross.currentPass.filter(Boolean).length;
+    const cand = cross.candidatePass.filter(Boolean).length;
+    if (cand < cur) reasons.push(`cross-pillar: end-to-end score dropped (${cand} < ${cur})`);
+    const broke = cross.currentPass.flatMap((p, i) => (p && !cross.candidatePass[i] ? [i] : []));
+    if (broke.length) reasons.push(`cross-pillar: end-to-end regression on ${broke.length} case(s) that passed before`);
+  }
   return { passed: reasons.length === 0, reasons };
 }
 

@@ -223,19 +223,21 @@ export async function finishRoundRow(id: string, status: string, usage: unknown)
 }
 
 // ---------- private held-out sets (never in the public repo) ----------
+export type HeldoutKey = Family | "e2e";
+
 export interface HeldoutSet {
-  family: Family;
+  family: HeldoutKey;
   sha: string;
   cases: { input: string; expected: string | number }[];
 }
 
-export async function getHeldoutSet(family: Family): Promise<HeldoutSet | null> {
+export async function getHeldoutSet(family: HeldoutKey): Promise<HeldoutSet | null> {
   const r = (await sql()`select sha, cases_json from heldout_sets where family = ${family}`) as any[];
   return r[0] ? { family, sha: r[0].sha, cases: JSON.parse(r[0].cases_json) } : null;
 }
 
 /** Store a held-out set. If it differs from what was stored, old per-case pass vectors refer to a burned set, so clear them. */
-export async function seedHeldoutSet(family: Family, cases: HeldoutSet["cases"]): Promise<{ changed: boolean; sha: string }> {
+export async function seedHeldoutSet(family: HeldoutKey, cases: HeldoutSet["cases"]): Promise<{ changed: boolean; sha: string }> {
   const json = JSON.stringify(cases);
   const sha = sha256(json);
   const cur = (await sql()`select sha from heldout_sets where family = ${family}`) as any[];

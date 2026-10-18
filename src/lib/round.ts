@@ -1,10 +1,10 @@
 // One improvement round: evaluate current tool -> propose -> screen -> score in sandbox -> gate.
 // Returns a verdict plus usage for the ledger. Promotion still needs a hash-bound human approval (not here).
-import { FAMILIES, type Family, sha256 } from "./bench/cases";
+import { FAMILIES, type Family, PARTNER, sha256 } from "./bench/cases";
 import { loadHeldout } from "./heldout";
-import { decideGate, egressBlocked, feedbackSafeReasons, type GateDecision, type RunnerOutput, scoreOutputs, staticScreen } from "./gate";
+import { type CrossCheck, decideGate, egressBlocked, feedbackSafeReasons, type GateDecision, type RunnerOutput, scoreOutputs, staticScreen } from "./gate";
 import { type Failure, propose } from "./gemini";
-import { RUNNER_PY } from "./sandbox/runnerSource";
+import { PIPELINE_PY, RUNNER_PY } from "./sandbox/runnerSource";
 import { createSandbox, destroySandbox, exec, upload } from "./sandbox/client";
 
 export type RoundEvent = { type: string; [k: string]: unknown };
@@ -24,6 +24,7 @@ export interface RoundResult {
   heldout: { current: number; candidate: number; total: number };
   gate?: GateDecision;
   heldoutPass?: boolean[]; // per-case pass vector of the candidate (stored with the tool version)
+  cross?: { current: number; candidate: number; total: number; partner: Family }; // sealed end-to-end check (Command <-> Govern)
   currentHeldoutPass: boolean[]; // per-case pass vector of the tool being improved
   currentVisibleCount: number;
   usage: RoundUsage;
@@ -41,12 +42,26 @@ async function runInSandbox(sandboxId: string, code: string, inputs: string[]): 
   }
 }
 
+async function runPipeline(sandboxId: string, commandCode: string, governCode: string, inputs: string[]): Promise<{ out: RunnerOutput; execMs: number | null }> {
+  await upload(sandboxId, "/workspace/pipeline_runner.py", PIPELINE_PY);
+  await upload(sandboxId, "/workspace/pipe_command.py", commandCode);
+  await upload(sandboxId, "/workspace/pipe_govern.py", governCode);
+  const r = await exec(sandboxId, "timeout", ["25", "python3", "/workspace/pipeline_runner.py", "/workspace"], JSON.stringify({ inputs }));
+  const last = r.stdout.trim().split("\n").filter(Boolean).pop() ?? "";
+  try {
+    return { out: JSON.parse(last) as RunnerOutput, execMs: r.execMs };
+  } catch {
+    return { out: { load_error: `pipeline failed (exit ${r.exitCode}): ${r.stderr.slice(0, 120)}` }, execMs: r.execMs };
+  }
+}
+
 export async function runRound(opts: {
   family: Family;
   currentCode: string;
   currentHeldoutPass?: boolean[]; // known from when the current version was promoted
   sandboxId?: string; // reuse a session sandbox (free plan allows only one at a time)
   maxAttempts?: number;
+  partner?: { family: Family; code: string }; // the CURRENT active tool of the partner pillar (required for command/govern)
   scripted?: { code: string; rationale: string }; // demo-only: a fixed candidate instead of calling the model
   emit?: (e: RoundEvent) => void;
 }): Promise<RoundResult> {
@@ -58,6 +73,10 @@ export async function runRound(opts: {
   const held = await loadHeldout(opts.family); // fail closed BEFORE any sandbox exists
   const heldCases = held.cases;
   const heldIn = heldCases.map((c) => c.input);
+  // Cross-pillar interference check applies to Command and Govern: sealed end-to-end set + the partner's active tool. Fail closed.
+  const partnerFamily = PARTNER[opts.family];
+  const sealed = partnerFamily ? await loadHeldout("e2e") : null;
+  if (partnerFamily && !opts.partner) throw new Error(`the partner tool (${partnerFamily}) was not provided; refusing to run (fail closed)`);
   const usage: RoundUsage = { tokensIn: 0, tokensOut: 0, execMs: 0, unknown: false };
   const addExec = (ms: number | null) => {
     if (ms === null || usage.execMs === null) {
@@ -98,6 +117,18 @@ export async function runRound(opts: {
     );
     emit({ type: "visible_failures", count: failures.length, cases: failures });
 
+    // Current end-to-end standing: current tool of THIS pillar + current tool of the partner.
+    const e2eIn = sealed ? sealed.cases.map((c) => c.input) : [];
+    const pairCode = (own: string) => (opts.family === "command" ? { command: own, govern: opts.partner?.code ?? "" } : { command: opts.partner?.code ?? "", govern: own });
+    let curE2e: boolean[] = [];
+    if (sealed) {
+      const pc = pairCode(opts.currentCode);
+      const r = await runPipeline(sandboxId, pc.command, pc.govern, e2eIn);
+      addExec(r.execMs);
+      curE2e = scoreOutputs(sealed.cases, r.out).pass;
+      emit({ type: "cross_baseline", partner: partnerFamily, passing: curE2e.filter(Boolean).length, total: e2eIn.length });
+    }
+
     // 2) Propose / screen / score / gate (up to maxAttempts)
     let prior: { code: string; rejectedBecause: string[] } | undefined;
     let last: RoundResult | undefined;
@@ -124,7 +155,21 @@ export async function runRound(opts: {
         candVisible = scoreOutputs(fbCases, sliceOut(r.out, 0, visIn.length)).count;
         candHeld = scoreOutputs(heldCases, sliceOut(r.out, visIn.length, heldIn.length)).pass;
       }
-      const gate = decideGate({ visibleCount: curVisible.count, heldoutPass: curHeldPass }, { visibleCount: candVisible, heldoutPass: candHeld }, screen);
+      let cross: CrossCheck | undefined;
+      let candE2eCount = 0;
+      if (sealed) {
+        let candE2e: boolean[] = Array(e2eIn.length).fill(false);
+        if (screen.ok) {
+          const pc = pairCode(p.code);
+          const r = await runPipeline(sandboxId, pc.command, pc.govern, e2eIn);
+          addExec(r.execMs);
+          candE2e = scoreOutputs(sealed.cases, r.out).pass;
+        }
+        candE2eCount = candE2e.filter(Boolean).length;
+        cross = { currentPass: curE2e, candidatePass: candE2e };
+        emit({ type: "cross_check", attempt, partner: partnerFamily, current: curE2e.filter(Boolean).length, candidate: candE2eCount, total: e2eIn.length });
+      }
+      const gate = decideGate({ visibleCount: curVisible.count, heldoutPass: curHeldPass }, { visibleCount: candVisible, heldoutPass: candHeld }, screen, cross);
       const candHeldCount = candHeld.filter(Boolean).length;
       emit({ type: "scores", attempt, visible: candVisible, visibleTotal: visIn.length, heldout: candHeldCount, heldoutTotal: heldIn.length, previousHeldout: curHeldCount });
       emit({ type: "gate", attempt, passed: gate.passed, reasons: gate.reasons });
@@ -137,6 +182,7 @@ export async function runRound(opts: {
         heldout: { current: curHeldCount, candidate: candHeldCount, total: heldIn.length },
         gate,
         heldoutPass: candHeld,
+        cross: sealed && partnerFamily ? { current: curE2e.filter(Boolean).length, candidate: candE2eCount, total: e2eIn.length, partner: partnerFamily } : undefined,
         currentHeldoutPass: curHeldPass,
         currentVisibleCount: curVisible.count,
         usage,

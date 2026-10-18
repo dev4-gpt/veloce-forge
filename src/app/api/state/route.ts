@@ -1,4 +1,4 @@
-import { FAMILIES, FAMILY_LIST } from "@/lib/bench/cases";
+import { FAMILIES, FAMILY_LIST, PARTNER } from "@/lib/bench/cases";
 import { ensureSchema, getActive, getHeldoutSet, getWallet, listTools, recentLedger } from "@/lib/db";
 
 
@@ -10,6 +10,7 @@ export async function GET() {
       const active = await getActive(f);
       const tools = await listTools(f);
       const held = await getHeldoutSet(f);
+      const sealed = PARTNER[f] ? await getHeldoutSet("e2e") : null;
       return {
         family: f,
         title: FAMILIES[f].title,
@@ -17,6 +18,7 @@ export async function GET() {
         heldoutTotal: held ? held.cases.length : 0,
         feedbackTotal: FAMILIES[f].visible.length + FAMILIES[f].field.length,
         heldoutCommitment: held ? held.sha : null,
+        crossCheck: PARTNER[f] ? { partner: PARTNER[f], total: sealed ? sealed.cases.length : 0, commitment: sealed ? sealed.sha : null } : null,
         activeId: active.id,
         activeVersion: active.version,
         activeHeldout: active.heldout_count,

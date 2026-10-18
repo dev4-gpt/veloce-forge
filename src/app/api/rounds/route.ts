@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { FAMILIES, type Family, sha256 } from "@/lib/bench/cases";
+import { FAMILIES, type Family, PARTNER, sha256 } from "@/lib/bench/cases";
 import { priceMicros, ROUND_CAP_MICROS } from "@/lib/cost";
 import {
   ensureSchema, finishRoundRow, getActive, insertTool, markBlocked, nextVersion, reserve,
@@ -49,11 +49,14 @@ export async function POST(req: Request) {
         reserved = true;
         send({ type: "reserved", roundId, capMicros: ROUND_CAP_MICROS });
         const active = await getActive(family);
+        const partnerFamily = PARTNER[family];
+        const partner = partnerFamily ? { family: partnerFamily, code: (await getActive(partnerFamily)).code } : undefined;
 
         const result = await runRound({
           family,
           currentCode: active.code,
           currentHeldoutPass: active.heldout_pass ?? undefined,
+          partner,
           scripted: body.cheat ? { code: cheatCode(family), rationale: "SCRIPTED DEMO: memorises the visible answers" } : undefined,
           maxAttempts: body.cheat ? 1 : 2,
           emit: send,

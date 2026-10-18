@@ -253,3 +253,7 @@ export function sha256(text: string): string {
 export function equalValue(a: unknown, b: string | number): boolean {
   return typeof a === typeof b && a === b;
 }
+
+/** Cross-pillar interference check: a promotion in one of these pillars is re-scored together with the CURRENT tool of its
+ *  partner on a sealed end-to-end set (user message -> Command -> action -> Govern -> final decision). */
+export const PARTNER: Partial<Record<Family, Family>> = { command: "govern", govern: "command" };
