@@ -18,7 +18,7 @@ const chip: Record<string, string> = {
 
 function describe(e: Ev): string {
   switch (e.type) {
-    case "reserved": return `Reserved ${usd(e.capMicros)} before any sandbox exists`;
+    case "reserved": return e.mode === "card_hold" ? `Stripe card hold placed (test mode, ${e.holdCents} cents, ${String(e.paymentIntent).slice(0, 14)}…) before any sandbox exists; only the actual cost will be captured` : `Reserved ${usd(e.capMicros)} before any sandbox exists`;
     case "refused": return `Refused: ${e.reason}. ${e.detail ?? ""}`;
     case "sandbox_created": return `Sandbox ${String(e.id).slice(0, 12)} created in ${Math.round(e.spawnMs)} ms. Egress allowlist: ${e.egress?.join(", ")} (outbound blocked)`;
     case "egress_check": return e.blocked ? `Egress verified from inside the sandbox: a request to ${e.target} failed (blocked)` : `EGRESS NOT BLOCKED: ${e.detail}`;
@@ -30,7 +30,7 @@ function describe(e: Ev): string {
     case "candidate": return `Candidate ${e.attempt} from ${e.model}: ${e.rationale}`;
     case "scores": return `Candidate ${e.attempt} scored: feedback ${e.visible}/${e.visibleTotal}, held-out ${e.heldout}/${e.heldoutTotal} (was ${e.previousHeldout})`;
     case "gate": return e.passed ? `Gate ${e.attempt}: PASSED. Waiting for human approval` : `Gate ${e.attempt}: REJECTED. ${(e.reasons as string[]).join("; ")}`;
-    case "settled": return `Settled ${usd(e.actualMicros)}; released ${usd(e.releasedMicros)}`;
+    case "settled": return e.mode === "card_hold" ? (e.waived ? `Card hold released in full (${usd(e.releasedMicros)}); this round was not charged` : `Captured ${usd(e.actualMicros)} from the card hold (Stripe's minimum charge); ${usd(e.releasedMicros)} released back`) : `Settled ${usd(e.actualMicros)}; released ${usd(e.releasedMicros)}`;
     case "blocked_unsettled": return `BLOCKED: ${e.reason}`;
     case "released": return `Hold released: ${e.reason}`;
     case "report_sealed": return `Report sealed in the hash chain as #${e.seq} (${String(e.hash).slice(0, 12)}…, ${e.signed ? "signed" : "unsigned"})`;
@@ -53,6 +53,7 @@ export default function Home() {
   const [recordings, setRecordings] = useState<{ roundId: string; family: string; status: string; recordedAt: string; eventCount: number }[]>([]);
   const [pick, setPick] = useState("");
   const [replaying, setReplaying] = useState(false);
+  const [cardHold, setCardHold] = useState(false);
   const timeline = useRef<HTMLDivElement>(null);
   const authHeaders = (): Record<string, string> => (passcode ? { "x-demo-passcode": passcode, "x-reviewer-token": passcode } : {});
 
@@ -112,7 +113,7 @@ export default function Home() {
     setEvents([]);
     setNotice(null);
     try {
-      const res = await fetch("/api/rounds", { method: "POST", headers: authHeaders(), body: JSON.stringify({ family, ...opts }) });
+      const res = await fetch("/api/rounds", { method: "POST", headers: authHeaders(), body: JSON.stringify({ family, ...opts, payWith: cardHold ? "card_hold" : "wallet" }) });
       if (!res.ok || !res.body) {
         const j = await res.json().catch(() => ({}));
         setEvents([{ type: "error", message: j.error ?? `HTTP ${res.status}` }]);
@@ -244,6 +245,11 @@ export default function Home() {
           );
         })}
       </section>
+
+      <label className="mt-4 flex items-start gap-2 text-xs text-zinc-600 dark:text-zinc-300">
+        <input type="checkbox" checked={cardHold} onChange={(e) => setCardHold(e.target.checked)} className="mt-0.5" />
+        <span>Pay the next round with a <b>Stripe card hold</b> (test mode) instead of wallet credits. The card is held for 50¢ first; a finished round is charged Stripe's 50¢ minimum (it cannot bill the exact few cents), a round that fails before it starts is released, and if usage is unknown the hold is kept for a person to resolve.</span>
+      </label>
 
       <section className="mt-6 grid gap-4 md:grid-cols-2">
         <div className="rounded-lg border border-zinc-200 p-4 dark:border-zinc-800">

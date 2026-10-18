@@ -58,6 +58,7 @@ export interface RoundBody {
   costMicros: number | null; // null when the usage figure was unknown (never recorded as zero)
   settlement: "settled" | "blocked_unsettled" | "released";
   eventsSha?: string | null; // digest of the stored event stream used for replay (see replay.ts); null/absent = not recorded
+  payment?: { mode: "wallet" | "card_hold"; paymentIntent: string | null; holdState: string | null; capturedCents: number | null }; // who paid; informational
   at: string; // server clock; not independently attested
 }
 

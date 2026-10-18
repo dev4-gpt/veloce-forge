@@ -5,9 +5,10 @@ import { summariseEvents, type RoundBody } from "@/lib/evidence";
 import { saveRoundEvents, type TimedEvent } from "@/lib/replay";
 import { priceMicros, ROUND_CAP_MICROS } from "@/lib/cost";
 import {
-  ensureSchema, finishRoundRow, getActive, getHeldoutSet, insertTool, markBlocked, nextVersion, reserve,
-  setActiveHeldout, settle, tryStartRound,
+  ensureSchema, finishRoundRow, getActive, getHeldoutSet, insertTool, nextVersion, setActiveHeldout, tryStartRound,
 } from "@/lib/db";
+import { stripeApi } from "@/lib/cardHold";
+import { capturePolicy, cardPayer, isBillable, walletPayer } from "@/lib/payer";
 import { runRound, type RoundEvent } from "@/lib/round";
 import { requireRole } from "@/lib/auth";
 
@@ -22,7 +23,7 @@ function cheatCode(family: Family): string {
 export async function POST(req: Request) {
   const auth = await requireRole(req, ["operator", "admin", "shared"]);
   if (auth instanceof Response) return auth;
-  const body = (await req.json().catch(() => ({}))) as { family?: Family; cheat?: boolean; simulateMissingUsage?: boolean };
+  const body = (await req.json().catch(() => ({}))) as { family?: Family; cheat?: boolean; simulateMissingUsage?: boolean; payWith?: "wallet" | "card_hold" };
   const family = body.family;
   if (!family || !FAMILIES[family]) return Response.json({ error: "family must be dates, money or durations" }, { status: 400 });
 
@@ -31,6 +32,8 @@ export async function POST(req: Request) {
   if (!(await tryStartRound(roundId, family, auth.identity.id))) {
     return Response.json({ error: "another round is running (free plan allows one sandbox at a time)" }, { status: 409 });
   }
+  // Who pays: the credit wallet (default) or a Stripe test-mode card hold (hold, run, capture the actual cost, free the rest).
+  const payer = body.payWith === "card_hold" ? cardPayer(roundId, ROUND_CAP_MICROS, () => stripeApi()) : walletPayer(roundId, ROUND_CAP_MICROS);
   const enc = new TextEncoder();
   const stream = new ReadableStream({
     async start(controller) {
@@ -64,12 +67,13 @@ export async function POST(req: Request) {
             send({ type: "report_error", message: "events not stored, so this round cannot be replayed: " + (err instanceof Error ? err.message : String(err)) });
           }
           const facts = summariseEvents(events);
+          const payment = await payer.info().catch(() => undefined);
           const held = await getHeldoutSet(family).catch(() => null);
           const body: RoundBody = {
             kind: "round", roundId, family, pillar: FAMILIES[family].pillar, startedBy: auth.identity.id,
             toolId: null, candidate: null, visible: null, heldout: null, heldoutCommitment: held?.sha ?? null, cross: null, gate: null,
             egressBlocked: facts.egressBlocked, astOk: facts.astOk, sandboxId: facts.sandboxId,
-            usage: { tokensIn: null, tokensOut: null, execMs: null }, costMicros: null, settlement, eventsSha, at: new Date().toISOString(), ...extra,
+            usage: { tokensIn: null, tokensOut: null, execMs: null }, costMicros: null, settlement, eventsSha, payment, at: new Date().toISOString(), ...extra,
           };
           const entry = await appendReport(body);
           send({ type: "report_sealed", seq: entry.seq, hash: entry.hash, signed: Boolean(entry.sig) });
@@ -79,14 +83,14 @@ export async function POST(req: Request) {
       };
       try {
         // I1: authorise and reserve BEFORE any sandbox exists.
-        const ok = await reserve(roundId, ROUND_CAP_MICROS);
-        if (!ok) {
+        const authz = await payer.authorize();
+        if (!authz.ok) {
           await finishRoundRow(roundId, "refused", {}); // free the single running slot
-          send({ type: "refused", reason: "insufficient_funds", detail: "Add credits first. No sandbox was created." });
+          send({ type: "refused", reason: authz.reason, detail: authz.reason === "insufficient_funds" ? authz.detail : `${authz.detail}. No sandbox was created.` });
           return;
         }
         reserved = true;
-        send({ type: "reserved", roundId, capMicros: ROUND_CAP_MICROS });
+        send(authz.event as RoundEvent);
         const active = await getActive(family);
         const partnerFamily = PARTNER[family];
         const partner = partnerFamily ? { family: partnerFamily, code: (await getActive(partnerFamily)).code } : undefined;
@@ -109,28 +113,18 @@ export async function POST(req: Request) {
         let status: string = result.verdict;
         let toolStatus: "proposed" | "rejected" | "blocked" = result.verdict === "proposed" ? "proposed" : "rejected";
 
-        if (unknown) {
+        // I2/I3: unknown usage is never priced as zero, and a failed settlement can never become success.
+        const actual = unknown ? null : priceMicros({ tokensIn: result.usage.tokensIn!, tokensOut: result.usage.tokensOut!, execMs: result.usage.execMs! });
+        const settled = await payer.settle(actual, isBillable(capturePolicy(), result.verdict));
+        settledOrBlocked = true;
+        if (settled.kind === "blocked") {
           status = "blocked_unsettled";
           toolStatus = "blocked";
-          await markBlocked(roundId, ROUND_CAP_MICROS, "usage unknown; reservation stays held");
-          settledOrBlocked = true;
-          send({ type: "blocked_unsettled", reason: "usage figure missing; hold kept; round cannot succeed" });
+          send({ type: "blocked_unsettled", reason: settled.reason });
         } else {
-          const actual = priceMicros({ tokensIn: result.usage.tokensIn!, tokensOut: result.usage.tokensOut!, execMs: result.usage.execMs! });
-          const settled = await settle(roundId, ROUND_CAP_MICROS, actual);
-          if (!settled) {
-            // I3: failed settlement (e.g. overrun) can never become success.
-            status = "blocked_unsettled";
-            toolStatus = "blocked";
-            await markBlocked(roundId, ROUND_CAP_MICROS, "settlement failed");
-            settledOrBlocked = true;
-            send({ type: "blocked_unsettled", reason: "settlement failed (overrun or duplicate)" });
-          } else {
-            settledOrBlocked = true;
-            settlement = "settled";
-            costMicros = actual;
-            send({ type: "settled", actualMicros: actual, releasedMicros: ROUND_CAP_MICROS - actual });
-          }
+          settlement = "settled";
+          costMicros = settled.costMicros;
+          send({ type: "settled", actualMicros: settled.costMicros, releasedMicros: settled.releasedMicros, mode: payer.mode, waived: settled.waived === true });
         }
 
         if (result.candidate) {
@@ -155,12 +149,12 @@ export async function POST(req: Request) {
         if (reserved && !settledOrBlocked) {
           if (!sandboxStarted) {
             // Failed before any sandbox or model call: usage is KNOWN to be zero (not unknown), so release the whole hold.
-            await settle(roundId, ROUND_CAP_MICROS, 0).catch(() => {});
+            await payer.releaseUnused().catch(() => {});
             settlement = "released";
             costMicros = 0;
             send({ type: "released", reason: "round failed before any sandbox ran; nothing was used" });
           } else {
-            await markBlocked(roundId, ROUND_CAP_MICROS, `round failed: ${message.slice(0, 120)}`).catch(() => {});
+            await payer.block(`round failed: ${message.slice(0, 120)}`).catch(() => {});
           }
         }
         send({ type: "error", message });
