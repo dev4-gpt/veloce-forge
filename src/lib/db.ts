@@ -36,6 +36,8 @@ export async function ensureSchema() {
   await q`create table if not exists rounds (id text primary key, family text not null, status text not null, usage_json text, created_at timestamptz not null default now())`;
   await q`create table if not exists reviewers (id text primary key, name text not null, role text not null check (role in ('operator','reviewer','admin')), token_hash text not null unique, disabled boolean not null default false, created_at timestamptz not null default now())`;
   await q`alter table approvals add column if not exists reviewer_id text`;
+  // The held-out set commitment (heldout_sets.sha) a proposal was scored against; review() refuses an approval if the family's set has since changed.
+  await q`alter table tools add column if not exists heldout_sha text`;
   await q`alter table rounds add column if not exists started_by text`;
   // The index below fails if two rows are 'running' (possible on a database that ran the older code, which had no guard).
   // Keep only the newest running row, and expire any older than 3 minutes, so a first start on an old database cannot fail.
@@ -138,6 +140,7 @@ export interface ToolRow {
   visible_count: number | null;
   heldout_count: number | null;
   heldout_pass: boolean[] | null;
+  heldout_sha: string | null; // commitment of the held-out set this version was scored against (null = unknown, e.g. made before this was recorded)
   round_id: string | null;
   rationale: string | null;
   gate: { passed: boolean; reasons: string[] } | null;
@@ -154,6 +157,7 @@ const toTool = (r: any): ToolRow => ({
   visible_count: r.visible_count === null ? null : Number(r.visible_count),
   heldout_count: r.heldout_count === null ? null : Number(r.heldout_count),
   heldout_pass: r.heldout_pass_json ? JSON.parse(r.heldout_pass_json) : null,
+  heldout_sha: r.heldout_sha ?? null,
   round_id: r.round_id,
   rationale: r.rationale,
   gate: r.gate_json ? JSON.parse(r.gate_json) : null,
@@ -180,8 +184,8 @@ export async function nextVersion(family: Family): Promise<number> {
 }
 
 export async function insertTool(t: Omit<ToolRow, "created_at">) {
-  await sql()`insert into tools(id, family, version, code, sha, status, visible_count, heldout_count, heldout_pass_json, round_id, rationale, gate_json)
-    values (${t.id}, ${t.family}, ${t.version}, ${t.code}, ${t.sha}, ${t.status}, ${t.visible_count}, ${t.heldout_count}, ${t.heldout_pass ? JSON.stringify(t.heldout_pass) : null}, ${t.round_id}, ${t.rationale}, ${t.gate ? JSON.stringify(t.gate) : null})`;
+  await sql()`insert into tools(id, family, version, code, sha, status, visible_count, heldout_count, heldout_pass_json, heldout_sha, round_id, rationale, gate_json)
+    values (${t.id}, ${t.family}, ${t.version}, ${t.code}, ${t.sha}, ${t.status}, ${t.visible_count}, ${t.heldout_count}, ${t.heldout_pass ? JSON.stringify(t.heldout_pass) : null}, ${t.heldout_sha}, ${t.round_id}, ${t.rationale}, ${t.gate ? JSON.stringify(t.gate) : null})`;
 }
 
 export async function getTool(id: string): Promise<ToolRow | null> {
@@ -192,6 +196,14 @@ export async function getTool(id: string): Promise<ToolRow | null> {
 export async function listTools(family: Family): Promise<ToolRow[]> {
   const r = (await sql()`select * from tools where family = ${family} order by version desc, created_at desc limit 12`) as any[];
   return r.map(toTool);
+}
+
+export const STALE_ERROR = "scored against a different held-out set; re-run the round";
+
+/** A proposal is stale when it was not scored against the held-out set currently stored for its family (or we cannot tell).
+ *  Approving it would skip the current set, so review() refuses; reject is still allowed. */
+export function isStaleProposal(t: Pick<ToolRow, "status" | "heldout_sha">, currentSetSha: string | null): boolean {
+  return t.status === "proposed" && (!t.heldout_sha || t.heldout_sha !== currentSetSha);
 }
 
 /** Approval is bound to the code hash: the caller passes the hash it reviewed; it must equal the hash recomputed from the
@@ -211,8 +223,14 @@ export async function review(toolId: string, decision: "approve" | "reject", sha
     }
   }
   const approve = decision === "approve";
+  if (approve) {
+    const cur = (await sql()`select sha from heldout_sets where family = ${t.family}`) as { sha: string }[];
+    if (isStaleProposal(t, cur[0]?.sha ?? null)) return { ok: false, error: STALE_ERROR };
+  }
+  // The held-out check is repeated inside the statement so a set re-seeded between the check above and here cannot slip through.
   const r = (await sql()`
-    with cand as (select id, family from tools where id = ${toolId} and status = 'proposed' and sha = ${actual}),
+    with cand as (select id, family from tools where id = ${toolId} and status = 'proposed' and sha = ${actual}
+      and (not ${approve}::boolean or heldout_sha = (select sha from heldout_sets where heldout_sets.family = tools.family))),
     appr as (insert into approvals(tool_id, decision, sha_at_decision, reviewer_id) select id, ${decision}::text, ${actual}::text, ${reviewerId}::text from cand returning 1),
     sup as (update tools set status = 'superseded' where ${approve}::boolean and status = 'active' and family = (select family from cand) and exists (select 1 from cand) returning 1),
     act as (update tools set status = case when ${approve}::boolean then 'active' else 'rejected' end where id in (select id from cand) returning 1)

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-type Hist = { id: string; version: number; status: string; heldout: number | null; visible: number | null; sha: string; rationale: string | null; gate: { passed: boolean; reasons: string[] } | null; code?: string; audit?: { status: "passed" | "failed"; reasons: string[] } | null };
+type Hist = { id: string; version: number; status: string; heldout: number | null; visible: number | null; sha: string; stale?: boolean; rationale: string | null; gate: { passed: boolean; reasons: string[] } | null; code?: string; audit?: { status: "passed" | "failed"; reasons: string[] } | null };
 type Fam = { family: string; title: string; pillar: string; heldoutTotal: number; feedbackTotal: number; heldoutCommitment: string | null; auditCommitment?: string | null; crossCheck: { partner: string; total: number; commitment: string | null } | null; activeId: string; activeVersion: number; activeHeldout: number | null; history: Hist[] };
 type State = { wallet: { balance: number; held: number }; families: Fam[]; ledger: { id: number; kind: string; amount_micros: number; round_id: string | null; idem_key: string | null; note: string | null }[] };
 type Ev = { type: string; [k: string]: any };
@@ -290,8 +290,9 @@ export default function Home() {
               <div className="mt-1 text-zinc-500">{p.rationale}</div>
               <div className="mt-1 font-mono text-[11px]">code sha256 {p.sha.slice(0, 16)}… (approval is bound to this hash)</div>
               <pre className="mt-2 max-h-48 overflow-auto rounded bg-zinc-50 p-2 text-[11px] dark:bg-zinc-900">{p.code}</pre>
+              {p.stale && <div className="mt-2 rounded bg-red-50 p-2 text-[11px] text-red-800 dark:bg-red-950/40 dark:text-red-200">Stale: scored against a different held-out set than the one in force now, so it cannot be approved. Reject it and re-run the round.</div>}
               <div className="mt-2 flex gap-2">
-                <button onClick={() => reviewTool(p.id, p.sha, "approve")} className="rounded bg-emerald-600 px-3 py-1 text-white">Approve and promote</button>
+                <button onClick={() => reviewTool(p.id, p.sha, "approve")} disabled={p.stale} title={p.stale ? "scored against a different held-out set; re-run the round" : undefined} className="rounded bg-emerald-600 px-3 py-1 text-white disabled:cursor-not-allowed disabled:opacity-40">Approve and promote</button>
                 <button onClick={() => reviewTool(p.id, p.sha, "reject")} className="rounded border border-zinc-300 px-3 py-1 dark:border-zinc-700">Reject</button>
               </div>
             </div>

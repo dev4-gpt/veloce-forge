@@ -132,7 +132,7 @@ export async function POST(req: Request) {
           await insertTool({
             id: toolId, family, version: await nextVersion(family), code: result.candidate.code, sha: sha256(result.candidate.code),
             status: toolStatus, visible_count: result.visible.candidate, heldout_count: result.heldout.candidate,
-            heldout_pass: result.heldoutPass ?? null, round_id: roundId, rationale: result.candidate.rationale, gate: result.gate ?? null,
+            heldout_pass: result.heldoutPass ?? null, heldout_sha: result.heldoutSha, round_id: roundId, rationale: result.candidate.rationale, gate: result.gate ?? null,
           });
           send({ type: "result", status, toolId, sha: sha256(result.candidate.code), visible: result.visible, heldout: result.heldout, gate: result.gate, needsApproval: toolStatus === "proposed" });
         }

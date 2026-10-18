@@ -1,7 +1,7 @@
 import { FAMILIES, FAMILY_LIST, PARTNER } from "@/lib/bench/cases";
 import { listAudits } from "@/lib/audit";
 import { chainHead } from "@/lib/chainStore";
-import { ensureSchema, getActive, getHeldoutSet, getWallet, listTools, recentLedger } from "@/lib/db";
+import { ensureSchema, getActive, getHeldoutSet, getWallet, isStaleProposal, listTools, recentLedger } from "@/lib/db";
 
 
 export async function GET() {
@@ -37,6 +37,7 @@ export async function GET() {
           rationale: t.rationale,
           gate: t.gate,
           audit: auditByTool.get(t.id) ? { status: auditByTool.get(t.id)!.status, reasons: auditByTool.get(t.id)!.status === "failed" ? auditByTool.get(t.id)!.reasons : [] } : null,
+          stale: isStaleProposal(t, held?.sha ?? null), // proposed against another held-out set: approve is refused, re-run the round
           code: t.status === "proposed" ? t.code : undefined,
           createdAt: t.created_at,
         })),

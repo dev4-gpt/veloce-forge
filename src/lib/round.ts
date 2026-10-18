@@ -24,6 +24,7 @@ export interface RoundResult {
   visible: { current: number; candidate: number; total: number };
   heldout: { current: number; candidate: number; total: number };
   gate?: GateDecision;
+  heldoutSha: string; // commitment of the held-out set this round actually loaded and scored against
   heldoutPass?: boolean[]; // per-case pass vector of the candidate (stored with the tool version)
   cross?: { current: number; candidate: number; total: number; partner: Family }; // sealed end-to-end check (Command <-> Govern)
   currentHeldoutPass: boolean[]; // per-case pass vector of the tool being improved
@@ -203,6 +204,7 @@ export async function runRound(opts: {
         visible: { current: curVisible.count, candidate: candVisible, total: visIn.length },
         heldout: { current: curHeldCount, candidate: candHeldCount, total: heldIn.length },
         gate,
+        heldoutSha: held.sha,
         heldoutPass: candHeld,
         cross: sealed && partnerFamily ? { current: curE2e.filter(Boolean).length, candidate: candE2eCount, total: e2eIn.length, partner: partnerFamily } : undefined,
         currentHeldoutPass: curHeldPass,

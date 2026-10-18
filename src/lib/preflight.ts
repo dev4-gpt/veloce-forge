@@ -27,7 +27,8 @@ export interface DbFacts {
   runningRounds: number;
   reviewers: { total: number; roles: Record<string, number> } | null;
   heldoutSets: Record<string, number>; // key -> number of cases
-  tools: { id: string; family: string; status: string; heldoutCount: number | null }[];
+  heldoutShas: Record<string, string>; // key -> commitment of the stored set
+  tools: { id: string; family: string; status: string; heldoutCount: number | null; heldoutSha: string | null }[];
   wallet: { balance: number; held: number } | null;
   chainLength: number | null;
   openHolds: number | null;
@@ -66,7 +67,7 @@ type Q = (strings: TemplateStringsArray, ...values: unknown[]) => Promise<unknow
 
 /** SELECT-only. Missing tables are reported, never created. */
 export async function gatherDb(q: Q): Promise<DbFacts> {
-  const empty: DbFacts = { reachable: false, tables: [], runningRounds: 0, reviewers: null, heldoutSets: {}, tools: [], wallet: null, chainLength: null, openHolds: null };
+  const empty: DbFacts = { reachable: false, tables: [], runningRounds: 0, reviewers: null, heldoutSets: {}, heldoutShas: {}, tools: [], wallet: null, chainLength: null, openHolds: null };
   try {
     const tables = ((await q`select table_name from information_schema.tables where table_schema = 'public'`) as { table_name: string }[]).map((r) => r.table_name);
     const has = (t: string) => tables.includes(t);
@@ -77,12 +78,17 @@ export async function gatherDb(q: Q): Promise<DbFacts> {
       out.reviewers = { total: rows.reduce((a, r) => a + Number(r.n), 0), roles: Object.fromEntries(rows.map((r) => [r.role, Number(r.n)])) };
     }
     if (has("heldout_sets")) {
-      const rows = (await q`select family, cases_json from heldout_sets`) as { family: string; cases_json: string }[];
+      const rows = (await q`select family, sha, cases_json from heldout_sets`) as { family: string; sha: string; cases_json: string }[];
       out.heldoutSets = Object.fromEntries(rows.map((r) => [r.family, (JSON.parse(r.cases_json) as unknown[]).length]));
+      out.heldoutShas = Object.fromEntries(rows.map((r) => [r.family, r.sha]));
     }
     if (has("tools")) {
-      const rows = (await q`select id, family, status, heldout_count from tools`) as { id: string; family: string; status: string; heldout_count: number | null }[];
-      out.tools = rows.map((r) => ({ id: r.id, family: r.family, status: r.status, heldoutCount: r.heldout_count === null ? null : Number(r.heldout_count) }));
+      // heldout_sha only exists after the upgrade; a not-yet-upgraded database means every proposal is unrecorded (stale).
+      const hasSha = ((await q`select 1 as x from information_schema.columns where table_schema = 'public' and table_name = 'tools' and column_name = 'heldout_sha'`) as unknown[]).length > 0;
+      const rows = (hasSha
+        ? await q`select id, family, status, heldout_count, heldout_sha from tools`
+        : await q`select id, family, status, heldout_count, null::text as heldout_sha from tools`) as { id: string; family: string; status: string; heldout_count: number | null; heldout_sha: string | null }[];
+      out.tools = rows.map((r) => ({ id: r.id, family: r.family, status: r.status, heldoutCount: r.heldout_count === null ? null : Number(r.heldout_count), heldoutSha: r.heldout_sha ?? null }));
     }
     if (has("wallet")) {
       const r = (await q`select balance_micros, held_micros from wallet where id = 1`) as { balance_micros: number; held_micros: number }[];
@@ -156,7 +162,10 @@ export function evaluate(env: EnvFacts, db: DbFacts, files: FileFacts): Check[] 
     } else add("warn", "reviewers", "none yet: the shared passcode is in force (demo mode). Create operator + reviewer identities last, because the passcode stops working as soon as the first one exists");
 
     const proposed = db.tools.filter((t) => t.status === "proposed");
-    if (proposed.length) add("warn", "pending proposals", `${proposed.map((t) => t.id).join(", ")} were gated against the OLD held-out regime; seeding new sets clears their score and approving them would skip the new sets. Reject or re-run them before deploy`);
+    // Same rule as review(): a proposal is approvable only if it was scored against the set stored now. Seeding new sets makes the rest stale too.
+    const stale = proposed.filter((t) => !t.heldoutSha || t.heldoutSha !== db.heldoutShas[t.family]);
+    if (stale.length) add("warn", "pending proposals", `${stale.map((t) => t.id).join(", ")} ${stale.length === 1 ? "was" : "were"} not scored against the held-out set stored now (or no set was recorded), so approving ${stale.length === 1 ? "it is" : "them is"} refused. Reject or re-run before deploy; seeding changed sets makes any other pending proposal stale too`);
+    else if (proposed.length) add("warn", "pending proposals", `${proposed.map((t) => t.id).join(", ")} await review; seeding changed held-out sets would make ${proposed.length === 1 ? "it" : "them"} stale (approval refused)`);
     const promoted = db.tools.filter((t) => t.status === "active" && !t.id.endsWith("-v0"));
     if (promoted.length) add("warn", "tools promoted under the old regime", `${promoted.map((t) => t.id).join(", ")}: their held-out standing will be re-measured on the first round with the new sets; run a fresh audit on them afterwards`);
     if (db.wallet) {

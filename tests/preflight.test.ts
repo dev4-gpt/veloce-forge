@@ -13,7 +13,7 @@ const goodEnv = (): EnvFacts => ({
 });
 const sets = (n = 10) => ({ ...Object.fromEntries(FAMILIES.map((f) => [f, n])), e2e: 13, ...Object.fromEntries(FAMILIES.map((f) => [`audit:${f}`, n])) });
 const goodDb = (): DbFacts => ({
-  reachable: true, tables: ["rounds"], runningRounds: 0, reviewers: { total: 2, roles: { operator: 1, reviewer: 1 } }, heldoutSets: sets(), tools: [],
+  reachable: true, tables: ["rounds"], runningRounds: 0, reviewers: { total: 2, roles: { operator: 1, reviewer: 1 } }, heldoutSets: sets(), heldoutShas: Object.fromEntries(Object.keys(sets()).map((k) => [k, `sha-${k}`])), tools: [],
   wallet: { balance: 4_000_000, held: 0 }, chainLength: 3, openHolds: 0,
 });
 const goodFiles = (): FileFacts => ({ heldout: Object.fromEntries(FAMILIES.map((f) => [f, 10])), audit: Object.fromEntries(FAMILIES.map((f) => [f, 10])), overlaps: [] });
@@ -86,16 +86,32 @@ test("reviewers: none is demo mode (warn); roles that cannot both run and approv
 test("pending proposals and tools promoted under the old held-out regime are called out", () => {
   const db = goodDb();
   db.tools = [
-    { id: "t-money-r-1", family: "money", status: "proposed", heldoutCount: 10 },
-    { id: "t-dates-r-2", family: "dates", status: "active", heldoutCount: 10 },
-    { id: "t-dates-v0", family: "dates", status: "superseded", heldoutCount: null },
-    { id: "t-money-v0", family: "money", status: "active", heldoutCount: null },
+    { id: "t-money-r-1", family: "money", status: "proposed", heldoutCount: 10, heldoutSha: null },
+    { id: "t-dates-r-2", family: "dates", status: "active", heldoutCount: 10, heldoutSha: null },
+    { id: "t-dates-v0", family: "dates", status: "superseded", heldoutCount: null, heldoutSha: null },
+    { id: "t-money-v0", family: "money", status: "active", heldoutCount: null, heldoutSha: null },
   ];
   const cs = evaluate(goodEnv(), db, goodFiles());
   assert.match(cs.find((c) => c.item === "pending proposals")!.detail, /t-money-r-1/);
   const promoted = cs.find((c) => c.item === "tools promoted under the old regime")!;
   assert.match(promoted.detail, /t-dates-r-2/);
   assert.doesNotMatch(promoted.detail, /v0/); // baselines are not "promoted"
+});
+
+test("pending proposals: ones scored against another set (or unrecorded) are named as unapprovable, a current one only as pending", () => {
+  const db = goodDb();
+  db.tools = [
+    { id: "t-old", family: "money", status: "proposed", heldoutCount: 10, heldoutSha: "sha-money-OLD" },
+    { id: "t-unrecorded", family: "dates", status: "proposed", heldoutCount: 10, heldoutSha: null },
+    { id: "t-fresh", family: "durations", status: "proposed", heldoutCount: 10, heldoutSha: "sha-durations" },
+  ];
+  const d = evaluate(goodEnv(), db, goodFiles()).find((c) => c.item === "pending proposals")!;
+  assert.match(d.detail, /t-old, t-unrecorded .*refused/);
+  assert.doesNotMatch(d.detail.split("refused")[0], /t-fresh/);
+  db.tools = [db.tools[2]];
+  const only = evaluate(goodEnv(), db, goodFiles()).find((c) => c.item === "pending proposals")!;
+  assert.match(only.detail, /t-fresh.*await review/);
+  assert.doesNotMatch(only.detail, /not scored/);
 });
 
 test("wallet: held money and a low balance warn; an unreachable database blocks", () => {
@@ -177,6 +193,27 @@ test("gatherDb reads real state and changes nothing", async () => {
   assert.deepEqual(f.wallet, { balance: 1_000_000, held: 0 });
   assert.equal(f.chainLength, 0);
   assert.equal(f.openHolds, 0);
+});
+
+test("gatherDb works on a database from before heldout_sha existed (every proposal reads as unrecorded)", async () => {
+  await pg.exec("drop schema public cascade; create schema public;");
+  await pg.exec("create table tools (id text primary key, family text not null, status text not null, heldout_count int)");
+  await pg.exec("insert into tools values ('t-p', 'money', 'proposed', 10)");
+  bind();
+  const f = await gatherDb(sql());
+  assert.equal(f.error, undefined);
+  assert.deepEqual(f.tools, [{ id: "t-p", family: "money", status: "proposed", heldoutCount: 10, heldoutSha: null }]);
+});
+
+test("gatherDb reports the stored set commitments and each tool's recorded one", async () => {
+  await pg.exec("drop schema public cascade; create schema public;");
+  bind();
+  await ensureSchema();
+  const { sha } = await seedHeldoutSet("dates", Array.from({ length: 6 }, (_, i) => ({ input: `i${i}`, expected: "x" })));
+  await sql()`insert into tools(id, family, version, code, sha, status, heldout_sha) values ('t-d', 'dates', 1, 'c', 's', 'proposed', ${sha})`;
+  const f = await gatherDb(sql());
+  assert.equal(f.heldoutShas.dates, sha);
+  assert.equal(f.tools[0].heldoutSha, sha);
 });
 
 test("gatherDb reports an unreachable database instead of throwing", async () => {

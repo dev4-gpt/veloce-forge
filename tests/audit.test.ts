@@ -132,10 +132,11 @@ async function seedSets(audit = true) {
 /** v0 baseline (active) -> v1 proposed -> approved: v1 active, v0 superseded. Returns the promoted tool. */
 async function promote(code: string, heldoutCount: number, version = 1) {
   await getActive("dates");
+  await seedHeldoutSet("dates", HELD); // approval requires the proposal's held-out commitment to match the stored set (a no-op if already seeded)
   const id = `t-dates-v${version}`;
   await insertTool({
     id, family: "dates", version, code, sha: sha256(code), status: "proposed", visible_count: 6, heldout_count: heldoutCount,
-    heldout_pass: Array.from({ length: HELD.length }, (_, i) => i < heldoutCount), round_id: null, rationale: "x", gate: { passed: true, reasons: [] },
+    heldout_pass: Array.from({ length: HELD.length }, (_, i) => i < heldoutCount), heldout_sha: sha256(JSON.stringify(HELD)), round_id: null, rationale: "x", gate: { passed: true, reasons: [] },
   });
   assert.deepEqual(await review(id, "approve", sha256(code), null), { ok: true });
   return (await getTool(id))!;

@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { after, before, beforeEach, test } from "node:test";
 import { PGlite } from "@electric-sql/pglite";
 import { authenticate, requireRole } from "../src/lib/auth";
-import { __setSqlForTests, createReviewer, ensureSchema, getActive, insertTool, review, sql, tryStartRound } from "../src/lib/db";
+import { __setSqlForTests, createReviewer, ensureSchema, getActive, insertTool, review, seedHeldoutSet, sql, tryStartRound } from "../src/lib/db";
 import { sha256 } from "../src/lib/bench/cases";
 
 let pg: PGlite;
@@ -28,9 +28,10 @@ beforeEach(async () => {
 const env = { DEMO_PASSCODE: "shared-secret" } as unknown as NodeJS.ProcessEnv;
 const req = (h: Record<string, string> = {}) => new Request("http://x/api", { method: "POST", headers: h });
 const CODE = "def normalize(raw):\n    return raw\n";
+const HELD = [{ input: "a", expected: "1" }];
 const tool = (id: string, roundId: string) => ({
   id, family: "dates" as const, version: 1, code: CODE, sha: sha256(CODE), status: "proposed" as const,
-  visible_count: 1, heldout_count: 1, heldout_pass: [true], round_id: roundId, rationale: "x", gate: { passed: true, reasons: [] },
+  visible_count: 1, heldout_count: 1, heldout_pass: [true], heldout_sha: sha256(JSON.stringify(HELD)), round_id: roundId, rationale: "x", gate: { passed: true, reasons: [] },
 });
 
 test("demo mode: with no reviewers, the shared passcode works and maps to a pseudo identity", async () => {
@@ -85,6 +86,7 @@ test("separation of duties: whoever started the round cannot approve its tool; a
   const starter = await createReviewer("Starter", "admin");
   const other = await createReviewer("Other", "reviewer");
   await getActive("dates");
+  await seedHeldoutSet("dates", HELD);
   assert.equal(await tryStartRound("r-sod", "dates", starter.id), true);
   await insertTool(tool("t-sod", "r-sod"));
   const self = await review("t-sod", "approve", sha256(CODE), starter.id);
@@ -100,6 +102,7 @@ test("separation of duties: whoever started the round cannot approve its tool; a
 test("the shared passcode identity records no reviewer id (legacy demo mode)", async () => {
   await getActive("dates");
   await tryStartRound("r-demo", "dates", "shared-passcode");
+  await seedHeldoutSet("dates", HELD);
   await insertTool(tool("t-demo", "r-demo"));
   assert.deepEqual(await review("t-demo", "approve", sha256(CODE), null), { ok: true });
   const ap = (await sql()`select reviewer_id from approvals where tool_id = 't-demo'`) as { reviewer_id: string | null }[];

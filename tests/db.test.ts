@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { after, before, beforeEach, test } from "node:test";
 import { PGlite } from "@electric-sql/pglite";
 import {
-  __setSqlForTests, credit, ensureSchema, getActive, getHeldoutSet, getWallet, insertTool, LIFETIME_TOPUP_CAP_MICROS,
+  __setSqlForTests, credit, ensureSchema, getActive, getHeldoutSet, getTool, getWallet, insertTool, isStaleProposal, LIFETIME_TOPUP_CAP_MICROS,
   markBlocked, recentLedger, reserve, review, seedHeldoutSet, settle, sql, tryStartRound,
 } from "../src/lib/db";
 import { sha256 } from "../src/lib/bench/cases";
@@ -32,9 +32,11 @@ beforeEach(async () => {
   await ensureSchema();
 });
 
-const proposal = (id: string, code: string) => ({
+const HELD = [{ input: "a", expected: "1" }];
+const HELD_SHA = sha256(JSON.stringify(HELD)); // what seedHeldoutSet stores as the commitment
+const proposal = (id: string, code: string, heldoutSha: string | null = HELD_SHA) => ({
   id, family: "dates" as const, version: 1, code, sha: sha256(code), status: "proposed" as const,
-  visible_count: 12, heldout_count: 10, heldout_pass: Array(10).fill(true), round_id: "r1", rationale: "x", gate: { passed: true, reasons: [] },
+  visible_count: 12, heldout_count: 10, heldout_pass: Array(10).fill(true), heldout_sha: heldoutSha, round_id: "r1", rationale: "x", gate: { passed: true, reasons: [] },
 });
 
 test("credit is idempotent per key and respects the lifetime cap", async () => {
@@ -76,6 +78,7 @@ test("an overrun is refused, never clipped; a blocked round keeps its hold", asy
 
 test("approval is bound to the code hash and promotion is atomic", async () => {
   const active = await getActive("dates"); // creates v0 active
+  await seedHeldoutSet("dates", HELD);
   const code = "def normalize(raw):\n    return raw\n";
   await insertTool(proposal("t-1", code));
   assert.deepEqual(await review("t-1", "approve", "0000"), { ok: false, error: "hash mismatch: the code changed after review" });
@@ -86,6 +89,113 @@ test("approval is bound to the code hash and promotion is atomic", async () => {
   assert.equal(old[0].status, "superseded");
   assert.equal(((await sql()`select count(*) as n from approvals`) as { n: number }[])[0].n, 1);
   assert.equal((await review("t-1", "approve", sha256(code))).ok, false); // cannot approve twice
+});
+
+// ---------- held-out staleness: a proposal is approvable only against the set stored for its family now ----------
+const CODE = "def normalize(raw):\n    return raw\n";
+const NEW_CASES = [{ input: "b", expected: "2" }];
+const untouched = async (id: string, activeId: string) => {
+  assert.equal((await getActive("dates")).id, activeId); // nothing promoted
+  assert.equal(((await sql()`select status from tools where id = ${id}`) as { status: string }[])[0].status, "proposed");
+  assert.equal(((await sql()`select count(*) as n from approvals`) as { n: number }[])[0].n, 0); // and no approval recorded
+};
+
+test("insertTool records the held-out commitment and getTool returns it", async () => {
+  await seedHeldoutSet("dates", HELD);
+  await insertTool(proposal("t-rec", CODE));
+  assert.equal((await getTool("t-rec"))!.heldout_sha, HELD_SHA);
+  await insertTool({ ...proposal("t-unk", CODE + "#"), heldout_sha: null });
+  assert.equal((await getTool("t-unk"))!.heldout_sha, null);
+});
+
+test("ensureSchema adds heldout_sha to an older tools table without touching its rows", async () => {
+  await sql()`insert into tools(id, family, version, code, sha, status) values ('t-old', 'dates', 1, 'c', 's', 'proposed')`;
+  await sql()`alter table tools drop column heldout_sha`;
+  __setSqlForTests(async (strings, ...values) => {
+    const text = strings.reduce((acc, s, i) => acc + s + (i < values.length ? `$${i + 1}` : ""), "");
+    return (await pg.query(text, values as unknown[])).rows as unknown[];
+  });
+  await ensureSchema();
+  assert.equal((await getTool("t-old"))!.heldout_sha, null);
+});
+
+test("a proposal scored against an old held-out set cannot be approved once the set changes", async () => {
+  const active = await getActive("dates");
+  await seedHeldoutSet("dates", HELD);
+  await insertTool(proposal("t-old-regime", CODE)); // scored under HELD
+  await seedHeldoutSet("dates", NEW_CASES); // the family moves to a new private set
+  assert.deepEqual(await review("t-old-regime", "approve", sha256(CODE)), { ok: false, error: "scored against a different held-out set; re-run the round" });
+  await untouched("t-old-regime", active.id);
+});
+
+test("a proposal with no recorded held-out commitment cannot be approved", async () => {
+  const active = await getActive("dates");
+  await seedHeldoutSet("dates", HELD);
+  await insertTool({ ...proposal("t-null", CODE), heldout_sha: null }); // e.g. made before the column existed
+  const r = await review("t-null", "approve", sha256(CODE));
+  assert.equal(r.ok, false);
+  assert.match(r.error ?? "", /different held-out set/);
+  await untouched("t-null", active.id);
+});
+
+test("approval is refused when the family has no stored held-out set at all", async () => {
+  const active = await getActive("dates");
+  await insertTool(proposal("t-noset", CODE)); // claims HELD_SHA but no set is stored
+  assert.equal((await review("t-noset", "approve", sha256(CODE))).ok, false);
+  await untouched("t-noset", active.id);
+});
+
+test("a stale proposal can still be rejected", async () => {
+  const active = await getActive("dates");
+  await seedHeldoutSet("dates", HELD);
+  await insertTool(proposal("t-stale-rej", CODE));
+  await seedHeldoutSet("dates", NEW_CASES);
+  assert.deepEqual(await review("t-stale-rej", "reject", sha256(CODE)), { ok: true });
+  assert.equal(((await sql()`select status from tools where id = 't-stale-rej'`) as { status: string }[])[0].status, "rejected");
+  assert.equal((await getActive("dates")).id, active.id);
+});
+
+test("re-seeding the same held-out set keeps a proposal approvable; the commitment is per family", async () => {
+  await getActive("dates");
+  await seedHeldoutSet("dates", HELD);
+  await insertTool(proposal("t-same", CODE));
+  await seedHeldoutSet("dates", HELD); // unchanged
+  await seedHeldoutSet("money", NEW_CASES); // another family's set changing is irrelevant
+  assert.deepEqual(await review("t-same", "approve", sha256(CODE)), { ok: true });
+  assert.equal((await getActive("dates")).id, "t-same");
+});
+
+test("the set changing between the check and the promotion statement still blocks the approval", async () => {
+  const active = await getActive("dates");
+  await seedHeldoutSet("dates", HELD);
+  await insertTool(proposal("t-race", CODE));
+  const inner = async (strings: TemplateStringsArray, ...values: unknown[]) => {
+    const text = strings.reduce((acc, str, i) => acc + str + (i < values.length ? `$${i + 1}` : ""), "");
+    return (await pg.query(text, values as unknown[])).rows as unknown[];
+  };
+  let raced = false;
+  __setSqlForTests(async (strings, ...values) => {
+    // Right before the promotion statement, another process re-seeds the family's set.
+    if (!raced && strings.join("").includes("with cand as")) {
+      raced = true;
+      await pg.query("update heldout_sets set sha = 'someone-else' where family = 'dates'");
+    }
+    return inner(strings, ...values);
+  });
+  const r = await review("t-race", "approve", sha256(CODE));
+  assert.equal(raced, true);
+  assert.deepEqual(r, { ok: false, error: "tool changed state during review" });
+  await untouched("t-race", active.id);
+});
+
+test("isStaleProposal: only proposed tools can be stale, and unknown or missing commitments count as stale", () => {
+  assert.equal(isStaleProposal({ status: "proposed", heldout_sha: "a" }, "a"), false);
+  assert.equal(isStaleProposal({ status: "proposed", heldout_sha: "a" }, "b"), true);
+  assert.equal(isStaleProposal({ status: "proposed", heldout_sha: null }, "a"), true);
+  assert.equal(isStaleProposal({ status: "proposed", heldout_sha: "a" }, null), true);
+  assert.equal(isStaleProposal({ status: "proposed", heldout_sha: null }, null), true); // two unknowns are not a match
+  assert.equal(isStaleProposal({ status: "active", heldout_sha: null }, "a"), false);
+  assert.equal(isStaleProposal({ status: "rejected", heldout_sha: "a" }, "b"), false);
 });
 
 test("an edited candidate cannot be approved with the old hash", async () => {
