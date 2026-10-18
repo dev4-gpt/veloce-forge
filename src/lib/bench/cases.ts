@@ -3,9 +3,10 @@
 // database (seeded from the git-ignored private/heldout.json). Only their raw inputs go to the sandbox;
 // expected values stay on the server and are used only by the gate.
 import { createHash } from "node:crypto";
+import { ORCH_FIELD, ORCH_VISIBLE } from "./orchestrateData";
 
 export type Pillar = "command" | "context" | "orchestrate" | "create" | "govern" | "deliver";
-export type Family = "dates" | "money" | "durations" | "command" | "context" | "govern";
+export type Family = "dates" | "money" | "durations" | "command" | "context" | "govern" | "orchestrate";
 export type Case = { input: string; expected: string | number };
 
 export interface FamilySpec {
@@ -243,8 +244,42 @@ const govern: FamilySpec = {
 `,
 };
 
-export const FAMILIES: Record<Family, FamilySpec> = { dates, money, durations, command, context, govern };
-export const FAMILY_LIST: Family[] = ["dates", "money", "durations", "command", "context", "govern"];
+const orchestrate: FamilySpec = {
+  family: "orchestrate",
+  pillar: "orchestrate",
+  agentRole: "You are the Orchestrate-pillar agent: you plan how a job is executed, and choosing a single generalist agent instead of a team is a perfectly good plan when coordination costs more than it saves.",
+  title: "Orchestrate: execution plan",
+  extraImports: ["json"],
+  instruction:
+    "normalize(raw: str) -> str. raw is a JSON job: {\"budget\": int, \"handoff\": int, \"tasks\": [{\"id\": str, \"pillar\": str, \"cost\": int, \"value\": int, \"time\": int, \"deps\": [task ids]}]}. " +
+    "Return a JSON plan with EXACTLY the keys mode and steps: {\"mode\": \"single\" or \"multi\", \"steps\": [task ids in execution order]}. No other keys. " +
+    "You may run ANY subset of the tasks, but every chosen task's deps must also be chosen and appear EARLIER in steps; no task may appear twice. " +
+    "SINGLE: one generalist agent runs the steps one after another; each task costs ceil(cost * 1.4) and takes its time. " +
+    "MULTI: each task runs on the agent of its pillar. Different pillar agents run in parallel, but one pillar agent runs one task at a time, in the order given. " +
+    "A task starts when its agent is free and all its deps have finished, plus 1 extra time unit for every dep that was run by a DIFFERENT pillar agent (handoff wait). " +
+    "In multi mode a task that has at least one dep run by a different pillar agent also costs an extra 'handoff' (once per task). A multi task otherwise costs its cost. " +
+    "The total cost must not exceed budget. " +
+    "SCORE = (sum of the values of the chosen tasks) - 0.5 * makespan, where makespan is the finish time of the last step (0 if there are no steps). Maximise it. " +
+    "A plan counts as correct only if it is valid, scores at least as much as the best possible SINGLE plan, and is within 10% of the best possible plan overall.",
+  visible: ORCH_VISIBLE,
+  field: ORCH_FIELD,
+  baselineCode: `import json
+def normalize(raw):
+    job = json.loads(raw)
+    chosen = []
+    cost = 0
+    for t in job["tasks"]:
+        if all(d in chosen for d in t["deps"]):
+            c = (t["cost"] * 14 + 9) // 10
+            if cost + c <= job["budget"]:
+                chosen.append(t["id"])
+                cost += c
+    return json.dumps({"mode": "single", "steps": chosen})
+`,
+};
+
+export const FAMILIES: Record<Family, FamilySpec> = { dates, money, durations, command, context, govern, orchestrate };
+export const FAMILY_LIST: Family[] = ["dates", "money", "durations", "command", "context", "govern", "orchestrate"];
 
 export function sha256(text: string): string {
   return createHash("sha256").update(text).digest("hex");

@@ -13,7 +13,7 @@ export interface Scored {
   count: number;
 }
 
-export function scoreOutputs(cases: Case[], out: RunnerOutput): Scored {
+export function scoreOutputs(cases: Case[], out: RunnerOutput, scorer?: (c: Case, got: unknown) => boolean): Scored {
   const n = cases.length;
   if ("load_error" in out || !("outputs" in out) || out.outputs.length !== n) {
     const msg = "load_error" in out ? out.load_error : "runner returned the wrong number of outputs";
@@ -26,7 +26,7 @@ export function scoreOutputs(cases: Case[], out: RunnerOutput): Scored {
     if ("ok" in o) {
       got.push(o.ok);
       errors.push(null);
-      pass.push(equalValue(o.ok, cases[i].expected));
+      pass.push(scorer ? scorer(cases[i], o.ok) : equalValue(o.ok, cases[i].expected));
     } else {
       got.push(null);
       errors.push(o.err);

@@ -155,7 +155,7 @@ export default function Home() {
           {[
             ["Command", "thin agent", "intent routing, own private test set"],
             ["Context", "thin agent", "retrieval, own private test set"],
-            ["Orchestrate", "thin", "fixed round loop only; no agent"],
+            ["Orchestrate", "thin agent", "plan policy, scored by a simulator (not live)"],
             ["Create", "agent", "normaliser tools: dates, money, durations"],
             ["Govern", "agent + gate", "action policy agent; gate, budget, approval"],
             ["Deliver", "not built", "no trusted score, no real delivery"],
@@ -167,7 +167,7 @@ export default function Home() {
             </div>
           ))}
         </div>
-        <div className="mt-2 text-zinc-500">One shared governance loop (budget, gate, approval) runs a separate agent per pillar, each with its own role, task rules and private test set. Command, Context and Govern are new and thin: their benchmarks are tested, but they have not yet been run in live sandbox rounds. Orchestrate and Deliver have no trustworthy automatic score yet.</div>
+        <div className="mt-2 text-zinc-500">One shared governance loop (budget, gate, approval) runs a separate agent per pillar, each with its own role, task rules and private test set. Command, Context, Govern and Orchestrate are new and thin: their benchmarks are tested, but they have not yet been run in live sandbox rounds. Orchestrate is scored only by a simulator, so treat its results as simulated. Deliver has no trustworthy automatic score yet.</div>
       </section>
 
       <section className="grid gap-4 md:grid-cols-3">

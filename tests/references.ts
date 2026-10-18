@@ -70,4 +70,50 @@ def normalize(raw):
         return "flag"
     return "allow"
 `,
+  orchestrate: `import json, itertools
+def sim(job, order, mode):
+    t = {x["id"]: x for x in job["tasks"]}
+    fin, free = {}, {}
+    cost = value = span = clock = 0
+    for i in order:
+        x = t[i]
+        value += x["value"]
+        if mode == "single":
+            cost += (x["cost"] * 14 + 9) // 10
+            clock += x["time"]
+            fin[i] = clock
+            span = clock
+        else:
+            ready, crossed = 0, False
+            for d in x["deps"]:
+                diff = t[d]["pillar"] != x["pillar"]
+                crossed = crossed or diff
+                ready = max(ready, fin[d] + (1 if diff else 0))
+            start = max(free.get(x["pillar"], 0), ready)
+            end = start + x["time"]
+            free[x["pillar"]] = end
+            fin[i] = end
+            span = max(span, end)
+            cost += x["cost"] + (job["handoff"] if crossed else 0)
+    return cost, 2 * value - span
+def normalize(raw):
+    job = json.loads(raw)
+    t = {x["id"]: x for x in job["tasks"]}
+    ids = [x["id"] for x in job["tasks"]]
+    best = (0, "single", [])
+    for r in range(1, len(ids) + 1):
+        for sub in itertools.combinations(ids, r):
+            s = set(sub)
+            if any(d not in s for i in sub for d in t[i]["deps"]):
+                continue
+            for order in itertools.permutations(sub):
+                pos = {x: k for k, x in enumerate(order)}
+                if any(pos[d] > pos[i] for i in order for d in t[i]["deps"]):
+                    continue
+                for mode in ("single", "multi"):
+                    c, net = sim(job, order, mode)
+                    if c <= job["budget"] and net > best[0]:
+                        best = (net, mode, list(order))
+    return json.dumps({"mode": best[1], "steps": best[2]})
+`,
 };

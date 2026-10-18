@@ -1,6 +1,7 @@
 // One improvement round: evaluate current tool -> propose -> screen -> score in sandbox -> gate.
 // Returns a verdict plus usage for the ledger. Promotion still needs a hash-bound human approval (not here).
 import { FAMILIES, type Family, PARTNER, sha256 } from "./bench/cases";
+import { SCORERS } from "./bench/scorers";
 import { loadHeldout } from "./heldout";
 import { type CrossCheck, decideGate, egressBlocked, feedbackSafeReasons, type GateDecision, type RunnerOutput, scoreOutputs, staticScreen } from "./gate";
 import { type Failure, propose } from "./gemini";
@@ -67,6 +68,7 @@ export async function runRound(opts: {
 }): Promise<RoundResult> {
   const emit = opts.emit ?? (() => {});
   const spec = FAMILIES[opts.family];
+  const scorer = SCORERS[opts.family]; // custom server-side scoring (e.g. a plan simulator); undefined = exact match
   const maxAttempts = opts.maxAttempts ?? 2;
   const fbCases = [...spec.visible, ...spec.field]; // feedback set: visible + field reports (never held-out)
   const visIn = fbCases.map((c) => c.input);
@@ -107,8 +109,8 @@ export async function runRound(opts: {
     const needHeld = !opts.currentHeldoutPass;
     const cur = await runInSandbox(sandboxId, opts.currentCode, needHeld ? [...visIn, ...heldIn] : visIn);
     addExec(cur.execMs);
-    const curVisible = scoreOutputs(fbCases, sliceOut(cur.out, 0, visIn.length));
-    const curHeldPass = needHeld ? scoreOutputs(heldCases, sliceOut(cur.out, visIn.length, heldIn.length)).pass : opts.currentHeldoutPass!;
+    const curVisible = scoreOutputs(fbCases, sliceOut(cur.out, 0, visIn.length), scorer);
+    const curHeldPass = needHeld ? scoreOutputs(heldCases, sliceOut(cur.out, visIn.length, heldIn.length), scorer).pass : opts.currentHeldoutPass!;
     const curHeldCount = curHeldPass.filter(Boolean).length;
     emit({ type: "baseline", visible: curVisible.count, visibleTotal: visIn.length, heldout: curHeldCount, heldoutTotal: heldIn.length });
 
@@ -152,8 +154,8 @@ export async function runRound(opts: {
       if (screen.ok) {
         const r = await runInSandbox(sandboxId, p.code, [...visIn, ...heldIn]);
         addExec(r.execMs);
-        candVisible = scoreOutputs(fbCases, sliceOut(r.out, 0, visIn.length)).count;
-        candHeld = scoreOutputs(heldCases, sliceOut(r.out, visIn.length, heldIn.length)).pass;
+        candVisible = scoreOutputs(fbCases, sliceOut(r.out, 0, visIn.length), scorer).count;
+        candHeld = scoreOutputs(heldCases, sliceOut(r.out, visIn.length, heldIn.length), scorer).pass;
       }
       let cross: CrossCheck | undefined;
       let candE2eCount = 0;
