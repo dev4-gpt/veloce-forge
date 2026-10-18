@@ -132,3 +132,18 @@ test("changing the held-out set clears old per-case pass vectors; unchanged seed
   assert.deepEqual((await getActive("dates")).heldout_pass, [true]);
   assert.equal((await getHeldoutSet("dates"))?.cases.length, 1);
 });
+
+test("first start on an older database with several stale 'running' rounds does not fail, and keeps at most the newest", async () => {
+  await pg.exec("drop schema public cascade; create schema public;");
+  await pg.exec("create table rounds (id text primary key, family text not null, status text not null, usage_json text, created_at timestamptz not null default now())");
+  await pg.exec(`insert into rounds(id, family, status, created_at) values
+    ('old1','dates','running', now() - interval '2 hours'), ('old2','money','running', now() - interval '1 hour'), ('fresh','dates','running', now())`);
+  __setSqlForTests(async (strings, ...values) => {
+    const text = strings.reduce((acc, s, i) => acc + s + (i < values.length ? `$${i + 1}` : ""), "");
+    return (await pg.query(text, values as unknown[])).rows as unknown[];
+  });
+  await ensureSchema(); // would throw "could not create unique index" before the fix
+  const rows = (await sql()`select id, status from rounds order by id`) as { id: string; status: string }[];
+  assert.deepEqual(rows.map((r) => [r.id, r.status]), [["fresh", "running"], ["old1", "abandoned"], ["old2", "abandoned"]]);
+  assert.equal(await tryStartRound("r-next", "dates"), false); // the guard is active: one fresh round is still running
+});

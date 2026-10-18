@@ -37,6 +37,9 @@ export async function ensureSchema() {
   await q`create table if not exists reviewers (id text primary key, name text not null, role text not null check (role in ('operator','reviewer','admin')), token_hash text not null unique, disabled boolean not null default false, created_at timestamptz not null default now())`;
   await q`alter table approvals add column if not exists reviewer_id text`;
   await q`alter table rounds add column if not exists started_by text`;
+  // The index below fails if two rows are 'running' (possible on a database that ran the older code, which had no guard).
+  // Keep only the newest running row, and expire any older than 3 minutes, so a first start on an old database cannot fail.
+  await q`update rounds set status = 'abandoned' where status = 'running' and (created_at < now() - interval '3 minutes' or id <> (select id from rounds where status = 'running' order by created_at desc, id desc limit 1))`;
   await q`create unique index if not exists one_running_round on rounds ((1)) where status = 'running'`;
   // Tamper-evident report chain (see evidence.ts). body_json is the canonical text that was hashed; rows are never updated or deleted.
   await q`create table if not exists report_chain (seq bigint primary key, prev text not null, body_json text not null, hash text not null unique, sig text, kid text, created_at timestamptz not null default now())`;
