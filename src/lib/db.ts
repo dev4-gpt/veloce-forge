@@ -23,6 +23,7 @@ export async function ensureSchema() {
   await q`create table if not exists stripe_events (event_id text primary key, kind text, created_at timestamptz not null default now())`;
   await q`create table if not exists tools (id text primary key, family text not null, version int not null, code text not null, sha text not null, status text not null, visible_count int, heldout_count int, heldout_pass_json text, round_id text, rationale text, gate_json text, created_at timestamptz not null default now())`;
   await q`create table if not exists approvals (id bigserial primary key, tool_id text not null, decision text not null, sha_at_decision text not null, created_at timestamptz not null default now())`;
+  await q`create table if not exists heldout_sets (family text primary key, sha text not null, cases_json text not null, updated_at timestamptz not null default now())`;
   await q`create table if not exists rounds (id text primary key, family text not null, status text not null, usage_json text, created_at timestamptz not null default now())`;
   schemaReady = true;
 }
@@ -193,4 +194,27 @@ export async function startRoundRow(id: string, family: Family) {
 
 export async function finishRoundRow(id: string, status: string, usage: unknown) {
   await sql()`update rounds set status = ${status}, usage_json = ${JSON.stringify(usage)} where id = ${id}`;
+}
+
+// ---------- private held-out sets (never in the public repo) ----------
+export interface HeldoutSet {
+  family: Family;
+  sha: string;
+  cases: { input: string; expected: string | number }[];
+}
+
+export async function getHeldoutSet(family: Family): Promise<HeldoutSet | null> {
+  const r = (await sql()`select sha, cases_json from heldout_sets where family = ${family}`) as any[];
+  return r[0] ? { family, sha: r[0].sha, cases: JSON.parse(r[0].cases_json) } : null;
+}
+
+/** Store a held-out set. If it differs from what was stored, old per-case pass vectors refer to a burned set, so clear them. */
+export async function seedHeldoutSet(family: Family, cases: HeldoutSet["cases"]): Promise<{ changed: boolean; sha: string }> {
+  const json = JSON.stringify(cases);
+  const sha = sha256(json);
+  const cur = (await sql()`select sha from heldout_sets where family = ${family}`) as any[];
+  if (cur[0]?.sha === sha) return { changed: false, sha };
+  await sql()`insert into heldout_sets(family, sha, cases_json) values (${family}, ${sha}, ${json}) on conflict (family) do update set sha = excluded.sha, cases_json = excluded.cases_json, updated_at = now()`;
+  await sql()`update tools set heldout_pass_json = null, heldout_count = null where family = ${family}`;
+  return { changed: true, sha };
 }

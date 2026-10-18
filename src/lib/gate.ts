@@ -97,3 +97,12 @@ export function decideGate(current: Standing, candidate: Standing, screen: Scree
 export function egressBlocked(exitCode: number, stdout: string): boolean {
   return !(exitCode === 0 && stdout.includes("REACHED"));
 }
+
+/** What the model may be told about a rejection. Held-out counts and regression details stay server-side:
+ *  repeated queries of aggregate held-out scores would let the proposer overfit to the hidden set. */
+export function feedbackSafeReasons(reasons: string[]): string[] {
+  const safe = reasons.filter((r) => r.startsWith("static screen:"));
+  const hidden = reasons.length - safe.length;
+  if (hidden > 0) safe.push("the candidate did not generalise well enough to unseen cases; handle more format variants without hardcoding");
+  return safe;
+}

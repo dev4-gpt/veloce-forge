@@ -1,6 +1,7 @@
-// Synthetic benchmark: three "messy field" normalizers. Visible cases are shown to the agent
-// (input, expected, got) when it fails them. Held-out cases are NEVER shown: only the raw
-// inputs go to the sandbox; expected values stay on the server and are used only by the gate.
+// Synthetic benchmark: three "messy field" normalizers. Visible and field cases are shown to the agent
+// (input, expected, got) when it fails them. The HELD-OUT cases are NOT in this repository: they live in the
+// database (seeded from the git-ignored private/heldout.json). Only their raw inputs go to the sandbox;
+// expected values stay on the server and are used only by the gate.
 import { createHash } from "node:crypto";
 
 export type Family = "dates" | "money" | "durations";
@@ -12,7 +13,6 @@ export interface FamilySpec {
   instruction: string;
   visible: Case[];
   field: Case[]; // "field reports": user-flagged failures; shown to the agent in later rounds; disjoint from held-out
-  heldout: Case[];
   baselineCode: string; // library v0: deliberately naive
 }
 
@@ -38,18 +38,6 @@ const dates: FamilySpec = {
     { input: "Tuesday, March 3, 2026", expected: "2026-03-03" },
     { input: "Sep 9th 2025", expected: "2025-09-09" },
     { input: "6/7/25", expected: "2025-06-07" },
-  ],
-  heldout: [
-    { input: "2026.10.05", expected: "2026-10-05" },
-    { input: "05-Oct-26", expected: "2026-10-05" },
-    { input: "October 5th, 2026", expected: "2026-10-05" },
-    { input: "10/5/26", expected: "2026-10-05" },
-    { input: "2026/10/05", expected: "2026-10-05" },
-    { input: "Monday, October 5, 2026", expected: "2026-10-05" },
-    { input: "5-Oct-2026", expected: "2026-10-05" },
-    { input: "1st March 2025", expected: "2025-03-01" },
-    { input: "Dec 31 2024", expected: "2024-12-31" },
-    { input: "2/29/2024", expected: "2024-02-29" },
   ],
   baselineCode: `def normalize(raw):
     s = raw.strip()
@@ -86,18 +74,6 @@ const money: FamilySpec = {
     { input: "2.000,00 £", expected: 200000 },
     { input: "1,000", expected: 100000 },
   ],
-  heldout: [
-    { input: "1.234,50 €", expected: 123450 },
-    { input: "EUR 7,5", expected: 750 },
-    { input: "$ 1 234.00", expected: 123400 },
-    { input: "(12.00)", expected: -1200 },
-    { input: "£1,000", expected: 100000 },
-    { input: "€ 9,99", expected: 999 },
-    { input: "1,234", expected: 123400 },
-    { input: "0,50 EUR", expected: 50 },
-    { input: "USD 1,234,567.89", expected: 123456789 },
-    { input: "$.75", expected: 75 },
-  ],
   baselineCode: `def normalize(raw):
     s = raw.replace("$", "").replace(",", "").strip()
     return int(round(float(s) * 100))
@@ -128,18 +104,6 @@ const durations: FamilySpec = {
     { input: "3h 10m", expected: 190 },
     { input: "2 days", expected: 2880 },
   ],
-  heldout: [
-    { input: "1.5 hrs", expected: 90 },
-    { input: "1:30", expected: 90 },
-    { input: "PT1H30M", expected: 90 },
-    { input: "3600 s", expected: 60 },
-    { input: "2h 5m", expected: 125 },
-    { input: "0.25h", expected: 15 },
-    { input: "1 day", expected: 1440 },
-    { input: "90", expected: 90 },
-    { input: "1:05:00", expected: 65 },
-    { input: "45 minutes", expected: 45 },
-  ],
   baselineCode: `def normalize(raw):
     s = raw.strip().lower()
     if s.endswith("m") and s[:-1].isdigit():
@@ -150,11 +114,6 @@ const durations: FamilySpec = {
 
 export const FAMILIES: Record<Family, FamilySpec> = { dates, money, durations };
 export const FAMILY_LIST: Family[] = ["dates", "money", "durations"];
-
-/** Commitment to the held-out set; show it in the UI so it is visibly fixed before any candidate runs. */
-export function heldoutHash(family: Family): string {
-  return createHash("sha256").update(JSON.stringify(FAMILIES[family].heldout)).digest("hex");
-}
 
 export function sha256(text: string): string {
   return createHash("sha256").update(text).digest("hex");

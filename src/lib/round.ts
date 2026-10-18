@@ -1,7 +1,8 @@
 // One improvement round: evaluate current tool -> propose -> screen -> score in sandbox -> gate.
 // Returns a verdict plus usage for the ledger. Promotion still needs a hash-bound human approval (not here).
 import { FAMILIES, type Family, sha256 } from "./bench/cases";
-import { decideGate, egressBlocked, type GateDecision, type RunnerOutput, scoreOutputs, staticScreen } from "./gate";
+import { loadHeldout } from "./heldout";
+import { decideGate, egressBlocked, feedbackSafeReasons, type GateDecision, type RunnerOutput, scoreOutputs, staticScreen } from "./gate";
 import { type Failure, propose } from "./gemini";
 import { RUNNER_PY } from "./sandbox/runnerSource";
 import { createSandbox, destroySandbox, exec, upload } from "./sandbox/client";
@@ -54,7 +55,9 @@ export async function runRound(opts: {
   const maxAttempts = opts.maxAttempts ?? 2;
   const fbCases = [...spec.visible, ...spec.field]; // feedback set: visible + field reports (never held-out)
   const visIn = fbCases.map((c) => c.input);
-  const heldIn = spec.heldout.map((c) => c.input);
+  const held = await loadHeldout(opts.family); // fail closed BEFORE any sandbox exists
+  const heldCases = held.cases;
+  const heldIn = heldCases.map((c) => c.input);
   const usage: RoundUsage = { tokensIn: 0, tokensOut: 0, execMs: 0, unknown: false };
   const addExec = (ms: number | null) => {
     if (ms === null || usage.execMs === null) {
@@ -86,7 +89,7 @@ export async function runRound(opts: {
     const cur = await runInSandbox(sandboxId, opts.currentCode, needHeld ? [...visIn, ...heldIn] : visIn);
     addExec(cur.execMs);
     const curVisible = scoreOutputs(fbCases, sliceOut(cur.out, 0, visIn.length));
-    const curHeldPass = needHeld ? scoreOutputs(spec.heldout, sliceOut(cur.out, visIn.length, heldIn.length)).pass : opts.currentHeldoutPass!;
+    const curHeldPass = needHeld ? scoreOutputs(heldCases, sliceOut(cur.out, visIn.length, heldIn.length)).pass : opts.currentHeldoutPass!;
     const curHeldCount = curHeldPass.filter(Boolean).length;
     emit({ type: "baseline", visible: curVisible.count, visibleTotal: visIn.length, heldout: curHeldCount, heldoutTotal: heldIn.length });
 
@@ -119,7 +122,7 @@ export async function runRound(opts: {
         const r = await runInSandbox(sandboxId, p.code, [...visIn, ...heldIn]);
         addExec(r.execMs);
         candVisible = scoreOutputs(fbCases, sliceOut(r.out, 0, visIn.length)).count;
-        candHeld = scoreOutputs(spec.heldout, sliceOut(r.out, visIn.length, heldIn.length)).pass;
+        candHeld = scoreOutputs(heldCases, sliceOut(r.out, visIn.length, heldIn.length)).pass;
       }
       const gate = decideGate({ visibleCount: curVisible.count, heldoutPass: curHeldPass }, { visibleCount: candVisible, heldoutPass: candHeld }, screen);
       const candHeldCount = candHeld.filter(Boolean).length;
@@ -140,7 +143,7 @@ export async function runRound(opts: {
         attempts: attempt,
       };
       if (gate.passed) break;
-      prior = { code: p.code, rejectedBecause: gate.reasons };
+      prior = { code: p.code, rejectedBecause: feedbackSafeReasons(gate.reasons) };
     }
     if (usage.unknown && last) {
       last.verdict = "blocked_unsettled"; // unknown usage is never treated as zero cost

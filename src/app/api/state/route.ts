@@ -1,5 +1,5 @@
-import { FAMILIES, FAMILY_LIST, heldoutHash } from "@/lib/bench/cases";
-import { ensureSchema, getActive, getWallet, listTools, recentLedger } from "@/lib/db";
+import { FAMILIES, FAMILY_LIST } from "@/lib/bench/cases";
+import { ensureSchema, getActive, getHeldoutSet, getWallet, listTools, recentLedger } from "@/lib/db";
 
 
 export async function GET() {
@@ -9,12 +9,13 @@ export async function GET() {
     FAMILY_LIST.map(async (f) => {
       const active = await getActive(f);
       const tools = await listTools(f);
+      const held = await getHeldoutSet(f);
       return {
         family: f,
         title: FAMILIES[f].title,
-        heldoutTotal: FAMILIES[f].heldout.length,
+        heldoutTotal: held ? held.cases.length : 0,
         feedbackTotal: FAMILIES[f].visible.length + FAMILIES[f].field.length,
-        heldoutCommitment: heldoutHash(f),
+        heldoutCommitment: held ? held.sha : null,
         activeId: active.id,
         activeVersion: active.version,
         activeHeldout: active.heldout_count,

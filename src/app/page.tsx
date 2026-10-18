@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 type Hist = { id: string; version: number; status: string; heldout: number | null; visible: number | null; sha: string; rationale: string | null; gate: { passed: boolean; reasons: string[] } | null; code?: string };
-type Fam = { family: string; title: string; heldoutTotal: number; feedbackTotal: number; heldoutCommitment: string; activeId: string; activeVersion: number; activeHeldout: number | null; history: Hist[] };
+type Fam = { family: string; title: string; heldoutTotal: number; feedbackTotal: number; heldoutCommitment: string | null; activeId: string; activeVersion: number; activeHeldout: number | null; history: Hist[] };
 type State = { wallet: { balance: number; held: number }; families: Fam[]; ledger: { id: number; kind: string; amount_micros: number; round_id: string | null; idem_key: string | null; note: string | null }[] };
 type Ev = { type: string; [k: string]: any };
 
@@ -180,7 +180,7 @@ export default function Home() {
               <div className="mt-2 text-xs text-zinc-500">Held-out pass rate (hidden cases)</div>
               <div className="mt-1 h-2 rounded bg-zinc-100 dark:bg-zinc-800"><div className="h-2 rounded bg-emerald-500" style={{ width: `${pct}%` }} /></div>
               <div className="mt-1 font-mono text-sm">{f.activeHeldout === null ? "not measured yet" : `${f.activeHeldout}/${f.heldoutTotal}`}</div>
-              <div className="mt-2 text-[11px] text-zinc-500" title={f.heldoutCommitment}>held-out commitment sha256 {f.heldoutCommitment.slice(0, 12)}…</div>
+              <div className="mt-2 text-[11px] text-zinc-500" title={f.heldoutCommitment ?? undefined}>{f.heldoutCommitment ? `private held-out set, commitment sha256 ${f.heldoutCommitment.slice(0, 12)}…` : "held-out set not configured"}</div>
               <ul className="mt-3 space-y-1 text-xs">
                 {f.history.slice(0, 4).map((h) => (
                   <li key={h.id} className="flex items-center justify-between gap-2">
