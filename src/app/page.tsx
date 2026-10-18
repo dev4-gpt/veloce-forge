@@ -141,7 +141,7 @@ export default function Home() {
           <input type="password" value={passcode} onChange={(e) => { setPasscode(e.target.value); try { sessionStorage.setItem("forge-passcode", e.target.value); } catch {} }} placeholder="demo passcode" aria-label="Demo passcode" className="w-32 rounded-md border border-zinc-300 bg-transparent px-2 py-1.5 text-sm dark:border-zinc-700" title="Needed to run rounds, approve tools, or claim demo credits. Viewing is open." />
           <button onClick={topup} className="rounded-md bg-indigo-600 px-3 py-1.5 text-white hover:bg-indigo-500" title="Stripe Checkout in test mode; no real charge">Add $5 credits (Stripe test)</button>
           <button onClick={demoCredits} className="rounded-md border border-zinc-300 px-3 py-1.5 hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-900" title="No card. Labelled demo credits, once per day, not a payment.">Claim $5 demo credits</button>
-          <button onClick={replay} className="rounded-md border border-zinc-300 px-3 py-1.5 hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-900" title="Re-deliver the last Stripe payment event. It must be ignored.">Replay webhook</button>
+          <button onClick={replay} className="rounded-md border border-zinc-300 px-3 py-1.5 hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-900" title="Re-apply the last top-up through the same idempotent credit path. It must be ignored. (This does not exercise the Stripe signature check.)">Replay credit</button>
         </div>
       </header>
 

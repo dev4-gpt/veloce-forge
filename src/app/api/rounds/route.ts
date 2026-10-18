@@ -2,8 +2,8 @@ import { randomUUID } from "node:crypto";
 import { FAMILIES, type Family, sha256 } from "@/lib/bench/cases";
 import { priceMicros, ROUND_CAP_MICROS } from "@/lib/cost";
 import {
-  ensureSchema, finishRoundRow, getActive, insertTool, markBlocked, nextVersion, reserve, roundIsRunning,
-  setActiveHeldout, settle, startRoundRow,
+  ensureSchema, finishRoundRow, getActive, insertTool, markBlocked, nextVersion, reserve,
+  setActiveHeldout, settle, tryStartRound,
 } from "@/lib/db";
 import { runRound, type RoundEvent } from "@/lib/round";
 import { requirePasscode } from "@/lib/auth";
@@ -24,9 +24,10 @@ export async function POST(req: Request) {
   if (!family || !FAMILIES[family]) return Response.json({ error: "family must be dates, money or durations" }, { status: 400 });
 
   await ensureSchema();
-  if (await roundIsRunning()) return Response.json({ error: "another round is running (free plan allows one sandbox at a time)" }, { status: 409 });
-
   const roundId = "r-" + randomUUID().slice(0, 8);
+  if (!(await tryStartRound(roundId, family))) {
+    return Response.json({ error: "another round is running (free plan allows one sandbox at a time)" }, { status: 409 });
+  }
   const enc = new TextEncoder();
   const stream = new ReadableStream({
     async start(controller) {
@@ -41,12 +42,12 @@ export async function POST(req: Request) {
         // I1: authorise and reserve BEFORE any sandbox exists.
         const ok = await reserve(roundId, ROUND_CAP_MICROS);
         if (!ok) {
+          await finishRoundRow(roundId, "refused", {}); // free the single running slot
           send({ type: "refused", reason: "insufficient_funds", detail: "Add credits first. No sandbox was created." });
           return;
         }
         reserved = true;
         send({ type: "reserved", roundId, capMicros: ROUND_CAP_MICROS });
-        await startRoundRow(roundId, family);
         const active = await getActive(family);
 
         const result = await runRound({

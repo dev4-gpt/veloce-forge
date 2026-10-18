@@ -17,13 +17,13 @@ export async function POST(req: Request) {
     return Response.json({ error: "invalid signature" }, { status: 400 });
   }
   await ensureSchema();
-  const fresh = await recordStripeEvent(event.id, event.type);
-  if (!fresh) return Response.json({ received: true, duplicate: true });
+  // Credit first (idempotent by session id), then record the event. If the credit throws, Stripe retries and nothing is lost.
   if (event.type === "checkout.session.completed") {
     const s = event.data.object as Stripe.Checkout.Session;
     if (!s.livemode && s.payment_status === "paid") {
       await credit(`topup:${s.id}`, (s.amount_total ?? 0) * 10_000, "Stripe webhook (test mode)");
     }
   }
-  return Response.json({ received: true, duplicate: false });
+  const fresh = await recordStripeEvent(event.id, event.type);
+  return Response.json({ received: true, duplicate: !fresh });
 }
