@@ -3,9 +3,9 @@
 import { FAMILIES, type Family, PARTNER, sha256 } from "./bench/cases";
 import { SCORERS } from "./bench/scorers";
 import { loadHeldout } from "./heldout";
-import { type CrossCheck, decideGate, egressBlocked, feedbackSafeReasons, type GateDecision, type RunnerOutput, scoreOutputs, staticScreen } from "./gate";
+import { allowedImports, type CrossCheck, decideGate, egressBlocked, feedbackSafeReasons, type GateDecision, type RunnerOutput, scoreOutputs, staticScreen } from "./gate";
 import { type Failure, propose } from "./gemini";
-import { PIPELINE_PY, RUNNER_PY } from "./sandbox/runnerSource";
+import { AST_SCREEN_PY, PIPELINE_PY, RUNNER_PY } from "./sandbox/runnerSource";
 import { createSandbox, destroySandbox, exec, upload } from "./sandbox/client";
 
 export type RoundEvent = { type: string; [k: string]: unknown };
@@ -32,9 +32,21 @@ export interface RoundResult {
   attempts: number;
 }
 
-async function runInSandbox(sandboxId: string, code: string, inputs: string[]): Promise<{ out: RunnerOutput; execMs: number | null }> {
+/** Parse the candidate as a syntax tree INSIDE the sandbox and refuse it without running it (see AST_SCREEN_PY). */
+async function astScreen(sandboxId: string, code: string, allowed: string[]): Promise<{ ok: boolean; reasons: string[]; execMs: number | null }> {
   await upload(sandboxId, "/workspace/candidate.py", code);
-  const r = await exec(sandboxId, "timeout", ["20", "python3", "/workspace/runner.py"], JSON.stringify({ inputs }));
+  const r = await exec(sandboxId, "timeout", ["10", "python3", "/workspace/ast_screen.py", "/workspace/candidate.py", JSON.stringify(allowed)]);
+  try {
+    const j = JSON.parse(r.stdout.trim().split("\n").filter(Boolean).pop() ?? "") as { ok: boolean; reasons: string[] };
+    return { ok: j.ok === true, reasons: j.reasons ?? [], execMs: r.execMs };
+  } catch {
+    return { ok: false, reasons: ["the syntax-tree screen could not run (treated as a failure)"], execMs: r.execMs };
+  }
+}
+
+async function runInSandbox(sandboxId: string, code: string, inputs: string[], allowed: string[]): Promise<{ out: RunnerOutput; execMs: number | null }> {
+  await upload(sandboxId, "/workspace/candidate.py", code);
+  const r = await exec(sandboxId, "timeout", ["20", "python3", "/workspace/runner.py", "/workspace"], JSON.stringify({ inputs, allowed }));
   const last = r.stdout.trim().split("\n").filter(Boolean).pop() ?? "";
   try {
     return { out: JSON.parse(last) as RunnerOutput, execMs: r.execMs };
@@ -43,11 +55,11 @@ async function runInSandbox(sandboxId: string, code: string, inputs: string[]): 
   }
 }
 
-async function runPipeline(sandboxId: string, commandCode: string, governCode: string, inputs: string[]): Promise<{ out: RunnerOutput; execMs: number | null }> {
+async function runPipeline(sandboxId: string, commandCode: string, governCode: string, inputs: string[], allowed: string[]): Promise<{ out: RunnerOutput; execMs: number | null }> {
   await upload(sandboxId, "/workspace/pipeline_runner.py", PIPELINE_PY);
   await upload(sandboxId, "/workspace/pipe_command.py", commandCode);
   await upload(sandboxId, "/workspace/pipe_govern.py", governCode);
-  const r = await exec(sandboxId, "timeout", ["25", "python3", "/workspace/pipeline_runner.py", "/workspace"], JSON.stringify({ inputs }));
+  const r = await exec(sandboxId, "timeout", ["25", "python3", "/workspace/pipeline_runner.py", "/workspace"], JSON.stringify({ inputs, allowed }));
   const last = r.stdout.trim().split("\n").filter(Boolean).pop() ?? "";
   try {
     return { out: JSON.parse(last) as RunnerOutput, execMs: r.execMs };
@@ -68,6 +80,7 @@ export async function runRound(opts: {
 }): Promise<RoundResult> {
   const emit = opts.emit ?? (() => {});
   const spec = FAMILIES[opts.family];
+  const allowed = allowedImports(spec.extraImports);
   const scorer = SCORERS[opts.family]; // custom server-side scoring (e.g. a plan simulator); undefined = exact match
   const maxAttempts = opts.maxAttempts ?? 2;
   const fbCases = [...spec.visible, ...spec.field]; // feedback set: visible + field reports (never held-out)
@@ -97,6 +110,7 @@ export async function runRound(opts: {
       emit({ type: "sandbox_created", id: sb.id, spawnMs: sb.spawnMs, egress: ["127.0.0.1"] });
     }
     await upload(sandboxId, "/workspace/runner.py", RUNNER_PY);
+    await upload(sandboxId, "/workspace/ast_screen.py", AST_SCREEN_PY);
 
     // Prove the egress lock from inside the sandbox before any model-written code runs. Fail closed.
     const probe = await exec(sandboxId, "timeout", ["8", "python3", "-c", "import urllib.request;urllib.request.urlopen('https://example.com',timeout=4);print('REACHED')"]);
@@ -107,7 +121,7 @@ export async function runRound(opts: {
 
     // 1) Evaluate the current tool. Visible failures go to the agent; held-out never does.
     const needHeld = !opts.currentHeldoutPass;
-    const cur = await runInSandbox(sandboxId, opts.currentCode, needHeld ? [...visIn, ...heldIn] : visIn);
+    const cur = await runInSandbox(sandboxId, opts.currentCode, needHeld ? [...visIn, ...heldIn] : visIn, allowed);
     addExec(cur.execMs);
     const curVisible = scoreOutputs(fbCases, sliceOut(cur.out, 0, visIn.length), scorer);
     const curHeldPass = needHeld ? scoreOutputs(heldCases, sliceOut(cur.out, visIn.length, heldIn.length), scorer).pass : opts.currentHeldoutPass!;
@@ -125,7 +139,7 @@ export async function runRound(opts: {
     let curE2e: boolean[] = [];
     if (sealed) {
       const pc = pairCode(opts.currentCode);
-      const r = await runPipeline(sandboxId, pc.command, pc.govern, e2eIn);
+      const r = await runPipeline(sandboxId, pc.command, pc.govern, e2eIn, allowed);
       addExec(r.execMs);
       curE2e = scoreOutputs(sealed.cases, r.out).pass;
       emit({ type: "cross_baseline", partner: partnerFamily, passing: curE2e.filter(Boolean).length, total: e2eIn.length });
@@ -148,11 +162,17 @@ export async function runRound(opts: {
       }
       emit({ type: "candidate", attempt, model: p.model, rationale: p.rationale, code: p.code, sha: sha256(p.code) });
 
-      const screen = staticScreen(p.code, spec.extraImports);
+      let screen = staticScreen(p.code, spec.extraImports);
+      if (screen.ok) {
+        const ast = await astScreen(sandboxId, p.code, allowed);
+        addExec(ast.execMs);
+        if (!ast.ok) screen = { ok: false, reasons: ast.reasons.map((x) => `ast: ${x}`) };
+        emit({ type: "ast_screen", attempt, ok: ast.ok, reasons: ast.reasons });
+      }
       let candVisible = 0;
       let candHeld: boolean[] = Array(heldIn.length).fill(false);
       if (screen.ok) {
-        const r = await runInSandbox(sandboxId, p.code, [...visIn, ...heldIn]);
+        const r = await runInSandbox(sandboxId, p.code, [...visIn, ...heldIn], allowed);
         addExec(r.execMs);
         candVisible = scoreOutputs(fbCases, sliceOut(r.out, 0, visIn.length), scorer).count;
         candHeld = scoreOutputs(heldCases, sliceOut(r.out, visIn.length, heldIn.length), scorer).pass;
@@ -163,7 +183,7 @@ export async function runRound(opts: {
         let candE2e: boolean[] = Array(e2eIn.length).fill(false);
         if (screen.ok) {
           const pc = pairCode(p.code);
-          const r = await runPipeline(sandboxId, pc.command, pc.govern, e2eIn);
+          const r = await runPipeline(sandboxId, pc.command, pc.govern, e2eIn, allowed);
           addExec(r.execMs);
           candE2e = scoreOutputs(sealed.cases, r.out).pass;
         }

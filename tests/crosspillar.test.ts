@@ -10,7 +10,7 @@ import { after, before, test } from "node:test";
 import { PGlite } from "@electric-sql/pglite";
 import { FAMILIES, PARTNER, type Case } from "../src/lib/bench/cases";
 import { __setSqlForTests, ensureSchema, seedHeldoutSet } from "../src/lib/db";
-import { decideGate, scoreOutputs, staticScreen, type RunnerOutput } from "../src/lib/gate";
+import { allowedImports, decideGate, scoreOutputs, staticScreen, type RunnerOutput } from "../src/lib/gate";
 import { runRound } from "../src/lib/round";
 import { PIPELINE_PY } from "../src/lib/sandbox/runnerSource";
 import { REFERENCE } from "./references";
@@ -31,7 +31,7 @@ function runPipeline(commandCode: string, governCode: string, cases: Case[]): Ru
   writeFileSync(join(dir, "pipeline_runner.py"), PIPELINE_PY);
   writeFileSync(join(dir, "pipe_command.py"), commandCode);
   writeFileSync(join(dir, "pipe_govern.py"), governCode);
-  const r = spawnSync("python3", ["-I", join(dir, "pipeline_runner.py"), dir], { input: JSON.stringify({ inputs: cases.map((c) => c.input) }), encoding: "utf8", timeout: 20_000 });
+  const r = spawnSync("python3", ["-I", join(dir, "pipeline_runner.py"), dir], { input: JSON.stringify({ inputs: cases.map((c) => c.input), allowed: allowedImports() }), encoding: "utf8", timeout: 20_000 });
   assert.equal(r.status, 0, r.stderr);
   return JSON.parse(r.stdout.trim().split("\n").pop()!);
 }

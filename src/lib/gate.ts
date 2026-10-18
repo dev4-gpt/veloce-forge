@@ -46,6 +46,11 @@ const FORBIDDEN_TOKENS = ["__builtins__", "subprocess", "socket", "urllib", "req
 const FORBIDDEN_WORDS = /\b(os|sys)\./;
 const MAX_CODE_CHARS = 8000;
 
+/** The import allowlist for a pillar, as a list (passed to the sandbox runners and the AST screen). */
+export function allowedImports(extra: readonly string[] = []): string[] {
+  return [...new Set([...ALLOWED_IMPORTS, ...extra])];
+}
+
 export interface Screen {
   ok: boolean;
   reasons: string[];

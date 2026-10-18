@@ -24,6 +24,7 @@ function describe(e: Ev): string {
     case "egress_check": return e.blocked ? `Egress verified from inside the sandbox: a request to ${e.target} failed (blocked)` : `EGRESS NOT BLOCKED: ${e.detail}`;
     case "cross_baseline": return `Cross-pillar baseline with the active ${e.partner} tool: ${e.passing}/${e.total} sealed end-to-end cases pass`;
     case "cross_check": return `Cross-pillar check ${e.attempt}: end-to-end ${e.candidate}/${e.total} with the candidate (was ${e.current}); a drop or any broken case blocks promotion`;
+    case "ast_screen": return e.ok ? `Syntax-tree screen ${e.attempt}: candidate passed without being run` : `Syntax-tree screen ${e.attempt}: REJECTED (${(e.reasons as string[]).join("; ")})`;
     case "baseline": return `Current tool: ${e.visible}/${e.visibleTotal} feedback cases, held-out ${e.heldout}/${e.heldoutTotal}`;
     case "visible_failures": return `${e.count} failing feedback case(s) shown to the agent (held-out cases are never shown)`;
     case "candidate": return `Candidate ${e.attempt} from ${e.model}: ${e.rationale}`;
