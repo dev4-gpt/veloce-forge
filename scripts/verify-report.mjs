@@ -30,12 +30,24 @@ function canonical(v) {
 const sha256 = (s) => createHash("sha256").update(s).digest("hex");
 const entryHash = (seq, prev, body) => sha256(`${DOMAIN}\n${seq}\n${prev}\n${canonical(body)}`);
 
+// Fresh-audit rule on counts: the promoted tool must score at least as well as the version it replaced on a frozen set that never
+// took part in any promotion decision, and its held-out rate may not exceed its audit rate by more than 3/10.
+const AUDIT_MAX_GAP_TENTHS = 3;
+function auditCountsOk(held, cand, prev) {
+  if (!(held.total > 0 && cand.total > 0 && prev.total === cand.total)) return false;
+  if (cand.pass < prev.pass) return false;
+  return 10 * (held.pass * cand.total - cand.pass * held.total) <= AUDIT_MAX_GAP_TENTHS * held.total * cand.total;
+}
+
 export function verify(entries, { pubkey, head, margin = 2 } = {}) {
   const problems = [];
   let prev = GENESIS;
   let signed = 0;
   const rounds = new Map();
   const decided = new Set();
+  const approvedTools = new Set();
+  const revokedTools = new Set();
+  const audited = new Set();
   const seen = new Set();
   const pub = pubkey ? createPublicKey({ key: Buffer.from(pubkey, "base64"), format: "der", type: "spki" }) : null;
 
@@ -80,10 +92,24 @@ export function verify(entries, { pubkey, head, margin = 2 } = {}) {
       else {
         if (b.shaAtDecision !== r.candidate?.sha) problems.push(`${at}: decision hash differs from the code the round produced`);
         if (r.status !== "proposed") problems.push(`${at}: decision on a tool whose round was "${r.status}", not "proposed"`);
-        if (r.startedBy && r.startedBy === b.reviewerId && b.reviewerId !== "shared-passcode") problems.push(`${at}: separation of duties violated (${b.reviewerId} started the round and reviewed it)`);
+        if (b.decision !== "revoke" && r.startedBy && r.startedBy === b.reviewerId && b.reviewerId !== "shared-passcode") problems.push(`${at}: separation of duties violated (${b.reviewerId} started the round and reviewed it)`);
       }
-      if (decided.has(b.toolId)) problems.push(`${at}: tool ${b.toolId} was decided more than once`);
-      decided.add(b.toolId);
+      if (b.decision === "revoke") {
+        if (!approvedTools.has(b.toolId)) problems.push(`${at}: revoke of tool ${b.toolId} that was never approved`);
+        if (revokedTools.has(b.toolId)) problems.push(`${at}: tool ${b.toolId} was revoked more than once`);
+        revokedTools.add(b.toolId);
+      } else {
+        if (decided.has(b.toolId)) problems.push(`${at}: tool ${b.toolId} was decided more than once`);
+        decided.add(b.toolId);
+        if (b.decision === "approve") approvedTools.add(b.toolId);
+      }
+    } else if (b.kind === "audit") {
+      const k = `${b.toolId}|${b.auditSetSha}`;
+      if (!approvedTools.has(b.toolId)) problems.push(`${at}: audit of tool ${b.toolId} that was never approved`);
+      if (audited.has(k)) problems.push(`${at}: tool ${b.toolId} audited twice against the same set`);
+      audited.add(k);
+      if (b.egressBlocked !== true) problems.push(`${at}: audit ran without proven blocked outbound access`);
+      if (b.passed && !auditCountsOk(b.heldout, b.candidate, b.previous)) problems.push(`${at}: audit of ${b.toolId} is marked passed but its own numbers break the audit rule`);
     } else problems.push(`${at}: unknown entry kind`);
   });
 

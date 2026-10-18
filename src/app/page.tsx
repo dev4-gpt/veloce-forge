@@ -2,8 +2,8 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-type Hist = { id: string; version: number; status: string; heldout: number | null; visible: number | null; sha: string; rationale: string | null; gate: { passed: boolean; reasons: string[] } | null; code?: string };
-type Fam = { family: string; title: string; pillar: string; heldoutTotal: number; feedbackTotal: number; heldoutCommitment: string | null; crossCheck: { partner: string; total: number; commitment: string | null } | null; activeId: string; activeVersion: number; activeHeldout: number | null; history: Hist[] };
+type Hist = { id: string; version: number; status: string; heldout: number | null; visible: number | null; sha: string; rationale: string | null; gate: { passed: boolean; reasons: string[] } | null; code?: string; audit?: { status: "passed" | "failed"; reasons: string[] } | null };
+type Fam = { family: string; title: string; pillar: string; heldoutTotal: number; feedbackTotal: number; heldoutCommitment: string | null; auditCommitment?: string | null; crossCheck: { partner: string; total: number; commitment: string | null } | null; activeId: string; activeVersion: number; activeHeldout: number | null; history: Hist[] };
 type State = { wallet: { balance: number; held: number }; families: Fam[]; ledger: { id: number; kind: string; amount_micros: number; round_id: string | null; idem_key: string | null; note: string | null }[] };
 type Ev = { type: string; [k: string]: any };
 
@@ -164,10 +164,10 @@ export default function Home() {
     }
   }
 
-  async function reviewTool(id: string, sha: string, decision: "approve" | "reject") {
+  async function reviewTool(id: string, sha: string, decision: "approve" | "reject" | "revoke") {
     const r = await fetch(`/api/tools/${id}/review`, { method: "POST", headers: authHeaders(), body: JSON.stringify({ decision, sha }) });
     const j = await r.json();
-    setNotice(r.ok ? (decision === "approve" ? "Approved and promoted. The library now uses this version." : "Rejected.") : `Review refused: ${j.error}`);
+    setNotice(r.ok ? (decision === "approve" ? `Approved and promoted. The library now uses this version. Fresh audit: ${j.audit?.status === "skipped" ? `skipped (${j.audit.reason})` : j.audit?.status ?? "not run"}.` : decision === "revoke" ? "Revoked. The previous version is active again." : "Rejected.") : `Review refused: ${j.error}`);
     refresh();
   }
 
@@ -227,12 +227,17 @@ export default function Home() {
               <div className="mt-1 h-2 rounded bg-zinc-100 dark:bg-zinc-800"><div className="h-2 rounded bg-emerald-500" style={{ width: `${pct}%` }} /></div>
               <div className="mt-1 font-mono text-sm">{f.activeHeldout === null ? "not measured yet" : `${f.activeHeldout}/${f.heldoutTotal}`}</div>
               <div className="mt-2 text-[11px] text-zinc-500" title={f.heldoutCommitment ?? undefined}>{f.heldoutCommitment ? `private held-out set, commitment sha256 ${f.heldoutCommitment.slice(0, 12)}…` : "held-out set not configured"}</div>
+              <div className="mt-1 text-[11px] text-zinc-500" title={f.auditCommitment ?? undefined}>{f.auditCommitment ? `frozen fresh-audit set, commitment sha256 ${f.auditCommitment.slice(0, 12)}… (scored only after a promotion)` : "no fresh-audit set configured: promoted tools stay unaudited"}</div>
               {f.crossCheck && <div className="mt-1 text-[11px] text-zinc-500">{f.crossCheck.commitment ? `sealed cross-pillar check with ${f.crossCheck.partner}: ${f.crossCheck.total} end-to-end cases` : "cross-pillar check not configured (rounds refuse to run)"}</div>}
               <ul className="mt-3 space-y-1 text-xs">
                 {f.history.slice(0, 4).map((h) => (
                   <li key={h.id} className="flex items-center justify-between gap-2">
                     <span className="font-mono">v{h.version} · {h.heldout ?? "?"}/{f.heldoutTotal}</span>
-                    <span className={`rounded px-1.5 py-0.5 ${chip[h.status] ?? chip.superseded}`}>{h.status}</span>
+                    <span className="flex items-center gap-1">
+                      {h.audit && <span title={h.audit.status === "failed" ? h.audit.reasons.join("; ") : "scored on a frozen audit set that never took part in a promotion decision"} className={`rounded px-1.5 py-0.5 ${h.audit.status === "passed" ? chip.active : chip.rejected}`}>{h.audit.status === "passed" ? "audit passed" : "AUDIT FAILED"}</span>}
+                      {h.status === "active" && h.audit?.status === "failed" && <button onClick={() => reviewTool(h.id, h.sha, "revoke")} className="rounded border border-rose-500 px-1.5 py-0.5 text-rose-700 dark:text-rose-300" title="Take this version out of service; the version it replaced becomes active again">Revoke</button>}
+                      <span className={`rounded px-1.5 py-0.5 ${chip[h.status] ?? chip.superseded}`}>{h.status}</span>
+                    </span>
                   </li>
                 ))}
               </ul>

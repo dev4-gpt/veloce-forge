@@ -75,17 +75,43 @@ export function summariseEvents(events: readonly Record<string, unknown>[]): { s
   return { sandboxId, egressBlocked, astOk };
 }
 
+/** Fresh-audit rule on counts (shared with the offline verifier): the promoted tool must score at least as well as the version it
+ *  replaced on a frozen set that never took part in any promotion decision, and its held-out rate may not exceed its audit
+ *  rate by more than 3/10 (a large gap means it was selected for the held-out set rather than for the task). Integer arithmetic. */
+export const AUDIT_MAX_GAP_TENTHS = 3;
+export function auditCountsOk(held: { pass: number; total: number }, cand: { pass: number; total: number }, prev: { pass: number; total: number }): boolean {
+  if (!(held.total > 0 && cand.total > 0 && prev.total === cand.total)) return false;
+  if (cand.pass < prev.pass) return false;
+  return 10 * (held.pass * cand.total - cand.pass * held.total) <= AUDIT_MAX_GAP_TENTHS * held.total * cand.total;
+}
+
+export interface AuditBody {
+  kind: "audit";
+  toolId: string;
+  family: string;
+  auditSetSha: string; // commitment to the private audit set (never its contents)
+  candidate: { pass: number; total: number };
+  previous: { toolId: string; pass: number; total: number };
+  heldout: { pass: number; total: number };
+  passed: boolean;
+  reasons: string[];
+  egressBlocked: boolean | null;
+  sandboxId: string | null;
+  costMicros: number | null;
+  at: string;
+}
+
 export interface DecisionBody {
   kind: "decision";
   toolId: string;
   family: string;
-  decision: "approve" | "reject";
+  decision: "approve" | "reject" | "revoke";
   shaAtDecision: string;
   reviewerId: string; // "shared-passcode" in demo mode
   at: string;
 }
 
-export type ReportBody = RoundBody | DecisionBody;
+export type ReportBody = RoundBody | DecisionBody | AuditBody;
 
 export interface Entry {
   seq: number;
@@ -145,6 +171,9 @@ export function verifyChain(entries: Entry[], opts: VerifyOptions = {}): VerifyR
   let signedCount = 0;
   const rounds = new Map<string, RoundBody>(); // by toolId
   const decided = new Set<string>();
+  const approvedTools = new Set<string>();
+  const revokedTools = new Set<string>();
+  const audited = new Set<string>();
   const roundIds = new Set<string>();
   let pub: KeyObject | null = null;
   if (opts.publicKeyB64) pub = createPublicKey({ key: Buffer.from(opts.publicKeyB64, "base64"), format: "der", type: "spki" });
@@ -195,12 +224,26 @@ export function verifyChain(entries: Entry[], opts: VerifyOptions = {}): VerifyR
       else {
         if (b.shaAtDecision !== r.candidate?.sha) problems.push(`${at}: decision hash differs from the code the round produced`);
         if (r.status !== "proposed") problems.push(`${at}: decision on a tool whose round was "${r.status}", not "proposed"`);
-        if (r.startedBy && r.startedBy === b.reviewerId && b.reviewerId !== "shared-passcode") {
+        if (b.decision !== "revoke" && r.startedBy && r.startedBy === b.reviewerId && b.reviewerId !== "shared-passcode") {
           problems.push(`${at}: separation of duties violated (${b.reviewerId} started the round and reviewed it)`);
         }
       }
-      if (decided.has(b.toolId)) problems.push(`${at}: tool ${b.toolId} was decided more than once`);
-      decided.add(b.toolId);
+      if (b.decision === "revoke") {
+        if (!approvedTools.has(b.toolId)) problems.push(`${at}: revoke of tool ${b.toolId} that was never approved`);
+        if (revokedTools.has(b.toolId)) problems.push(`${at}: tool ${b.toolId} was revoked more than once`);
+        revokedTools.add(b.toolId);
+      } else {
+        if (decided.has(b.toolId)) problems.push(`${at}: tool ${b.toolId} was decided more than once`);
+        decided.add(b.toolId);
+        if (b.decision === "approve") approvedTools.add(b.toolId);
+      }
+    } else if (b.kind === "audit") {
+      const k = `${b.toolId}|${b.auditSetSha}`;
+      if (!approvedTools.has(b.toolId)) problems.push(`${at}: audit of tool ${b.toolId} that was never approved`);
+      if (audited.has(k)) problems.push(`${at}: tool ${b.toolId} audited twice against the same set`);
+      audited.add(k);
+      if (b.egressBlocked !== true) problems.push(`${at}: audit ran without proven blocked outbound access`);
+      if (b.passed && !auditCountsOk(b.heldout, b.candidate, b.previous)) problems.push(`${at}: audit of ${b.toolId} is marked passed but its own numbers break the audit rule`);
     } else problems.push(`${at}: unknown entry kind`);
   });
 

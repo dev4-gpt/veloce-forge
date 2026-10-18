@@ -44,7 +44,7 @@ async function astScreen(sandboxId: string, code: string, allowed: string[]): Pr
   }
 }
 
-async function runInSandbox(sandboxId: string, code: string, inputs: string[], allowed: string[]): Promise<{ out: RunnerOutput; execMs: number | null }> {
+export async function runInSandbox(sandboxId: string, code: string, inputs: string[], allowed: string[]): Promise<{ out: RunnerOutput; execMs: number | null }> {
   await upload(sandboxId, "/workspace/candidate.py", code);
   const r = await exec(sandboxId, "timeout", ["20", "python3", "/workspace/runner.py", "/workspace"], JSON.stringify({ inputs, allowed }));
   const last = r.stdout.trim().split("\n").filter(Boolean).pop() ?? "";

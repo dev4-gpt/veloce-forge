@@ -13,7 +13,7 @@ import { __setSqlForTests, ensureSchema, sql } from "../src/lib/db";
 import { appendReport, readChain } from "../src/lib/chainStore";
 import {
   canonical, entryHash, GENESIS, loadSigner, makeEntry, sha256hex, summariseEvents, verifyChain,
-  type DecisionBody, type Entry, type ReportBody, type RoundBody,
+  type AuditBody, type DecisionBody, type Entry, type ReportBody, type RoundBody,
 } from "../src/lib/evidence";
 // @ts-ignore plain .mjs on purpose: the offline verifier has no build step and no TypeScript
 import { verify as offlineVerifyRaw } from "../scripts/verify-report.mjs";
@@ -176,6 +176,45 @@ test("a tool cannot be decided twice, and the starter cannot review their own ro
   both(chain([round({ startedBy: "u-op" }), decision({ reviewerId: "u-op" })]), {}, "separation of duties");
   // demo mode: the shared passcode is one pseudo identity and is exempt, as in the database rule
   assert.equal(both(chain([round({ startedBy: "shared-passcode" }), decision({ reviewerId: "shared-passcode" })])).ok, true);
+});
+
+
+// ---------- fresh audits and revocation ----------
+const audit = (over: Partial<AuditBody> = {}): AuditBody => ({
+  kind: "audit", toolId: "t-dates-r-1", family: "dates", auditSetSha: "a".repeat(64), candidate: { pass: 8, total: 10 },
+  previous: { toolId: "t-dates-v0", pass: 5, total: 10 }, heldout: { pass: 9, total: 10 }, passed: true, reasons: [], egressBlocked: true,
+  sandboxId: "sb-2", costMicros: 20_000, at: "2026-10-17T20:10:00.000Z", ...over,
+});
+
+test("a promoted tool's audit and a later revoke form a valid chain", () => {
+  const es = chain([round(), decision(), audit(), decision({ decision: "revoke", reviewerId: "u-rev2" })]);
+  assert.equal(both(es).ok, true);
+});
+
+test("a failed audit may record numbers that would not pass; a passed audit may not", () => {
+  const bad = { candidate: { pass: 6, total: 10 }, previous: { toolId: "t-dates-v0", pass: 6, total: 10 }, heldout: { pass: 10, total: 10 } };
+  assert.equal(both(chain([round(), decision(), audit({ ...bad, passed: false, reasons: ["overfit"] })])).ok, true);
+  both(chain([round(), decision(), audit({ ...bad, passed: true })]), {}, "break the audit rule");
+  both(chain([round(), decision(), audit({ candidate: { pass: 4, total: 10 }, passed: true })]), {}, "break the audit rule"); // dropped below previous (5)
+  both(chain([round(), decision(), audit({ previous: { toolId: "t-dates-v0", pass: 5, total: 12 }, passed: true })]), {}, "break the audit rule"); // different sets
+});
+
+test("an audit needs a prior approval, must have proven blocked egress, and cannot repeat for the same set", () => {
+  both(chain([round(), audit()]), {}, "never approved");
+  both(chain([round(), decision({ decision: "reject" }), audit()]), {}, "never approved");
+  both(chain([round(), decision(), audit({ egressBlocked: null })]), {}, "without proven blocked outbound access");
+  both(chain([round(), decision(), audit(), audit()]), {}, "audited twice");
+  assert.equal(both(chain([round(), decision(), audit(), audit({ auditSetSha: "b".repeat(64) })])).ok, true); // a refreshed set is a new audit
+});
+
+test("revoke needs an earlier approval, happens once, and the separation-of-duties rule does not apply to it", () => {
+  both(chain([round(), decision({ decision: "revoke" })]), {}, "never approved");
+  both(chain([round(), decision({ decision: "reject" }), decision({ decision: "revoke" })]), {}, "never approved");
+  both(chain([round(), decision(), decision({ decision: "revoke" }), decision({ decision: "revoke" })]), {}, "revoked more than once");
+  // the person who started the round may take their own promoted tool out of service
+  assert.equal(both(chain([round({ startedBy: "u-op" }), decision({ reviewerId: "u-rev" }), decision({ decision: "revoke", reviewerId: "u-op" })])).ok, true);
+  // ...but still may not approve it
+  both(chain([round({ startedBy: "u-op" }), decision({ reviewerId: "u-op" })]), {}, "separation of duties");
 });
 
 // ---------- events ----------

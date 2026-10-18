@@ -117,3 +117,106 @@ def normalize(raw):
     return json.dumps({"mode": best[1], "steps": best[2]})
 `,
 };
+
+// Added for the fresh-audit check: independent references for the three data-normalising families, so every label in
+// visible, field, held-out and audit sets can be checked against the WRITTEN rules (see tests/audit.test.ts).
+REFERENCE.dates = String.raw`import re, datetime
+MONTHS = {m: i + 1 for i, m in enumerate("january february march april may june july august september october november december".split())}
+for k in list(MONTHS):
+    MONTHS[k[:3]] = MONTHS[k]
+WEEKDAYS = {"monday","mon","tuesday","tue","tues","wednesday","wed","thursday","thu","thur","thurs","friday","fri","saturday","sat","sunday","sun"}
+def mk(y, m, d):
+    if y < 100:
+        y += 2000
+    return datetime.date(y, m, d).isoformat()
+def normalize(raw):
+    s = raw.strip()
+    parts = re.split(r"[,\s]+", s, maxsplit=1)
+    if len(parts) == 2 and parts[0].lower().rstrip(".") in WEEKDAYS:
+        s = parts[1].strip()
+    m = re.fullmatch(r"(\d{4})[-./](\d{1,2})[-./](\d{1,2})", s)
+    if m:
+        return mk(int(m[1]), int(m[2]), int(m[3]))
+    m = re.fullmatch(r"(\d{1,2})/(\d{1,2})/(\d{4}|\d{2})", s)
+    if m:
+        return mk(int(m[3]), int(m[1]), int(m[2]))
+    m = re.fullmatch(r"(\d{1,2})(?:st|nd|rd|th)?[- ]+([A-Za-z]+)\.?[-, ]+(\d{4}|\d{2})", s)
+    if m and m[2].lower() in MONTHS:
+        return mk(int(m[3]), MONTHS[m[2].lower()], int(m[1]))
+    m = re.fullmatch(r"([A-Za-z]+)\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4}|\d{2})", s)
+    if m and m[1].lower() in MONTHS:
+        return mk(int(m[3]), MONTHS[m[1].lower()], int(m[2]))
+    raise ValueError("not a date")
+`;
+
+REFERENCE.money = String.raw`import re
+def normalize(raw):
+    s = raw.strip()
+    neg = False
+    if s.startswith("(") and s.endswith(")"):
+        neg = True
+        s = s[1:-1].strip()
+    if s.startswith("-"):
+        neg = True
+        s = s[1:].strip()
+    if s.endswith("¢"):
+        digits = re.sub(r"[^0-9]", "", s)
+        if not digits:
+            raise ValueError("no amount")
+        v = int(digits)
+        return -v if neg else v
+    s = re.sub(r"(?i)usd|eur|gbp|[$€£]", "", s).strip()
+    if s.startswith("-"):
+        neg = True
+        s = s[1:].strip()
+    if not re.fullmatch(r"[0-9.,\s]+", s) or not re.search(r"[0-9]", s):
+        raise ValueError("no amount")
+    s = s.replace(" ", "")
+    has_c, has_d = "," in s, "." in s
+    dec = None
+    if has_c and has_d:
+        dec = "," if s.rfind(",") > s.rfind(".") else "."
+    elif has_c or has_d:
+        sep = "," if has_c else "."
+        if len(s.split(sep)[-1]) in (1, 2):
+            dec = sep
+    if dec:
+        i = s.rfind(dec)
+        whole = re.sub(r"[.,]", "", s[:i]) or "0"
+        frac = s[i + 1:]
+        cents = int(whole) * 100 + int(frac.ljust(2, "0")[:2])
+    else:
+        cents = int(re.sub(r"[.,]", "", s)) * 100
+    return -cents if neg else cents
+`;
+
+REFERENCE.durations = String.raw`import re
+from decimal import Decimal, ROUND_HALF_UP
+UNIT = {"d": 1440, "day": 1440, "days": 1440, "h": 60, "hr": 60, "hrs": 60, "hour": 60, "hours": 60,
+        "m": 1, "min": 1, "mins": 1, "minute": 1, "minutes": 1, "s": Decimal(1) / 60, "sec": Decimal(1) / 60, "secs": Decimal(1) / 60,
+        "second": Decimal(1) / 60, "seconds": Decimal(1) / 60}
+def rnd(x):
+    return int(Decimal(x).quantize(Decimal(1), rounding=ROUND_HALF_UP))
+def normalize(raw):
+    s = raw.strip().lower()
+    m = re.fullmatch(r"pt(?:([0-9.]+)h)?(?:([0-9.]+)m)?(?:([0-9.]+)s)?", s)
+    if m and any(m.groups()):
+        h, mi, se = (Decimal(g) if g else Decimal(0) for g in m.groups())
+        return rnd(h * 60 + mi + se / 60)
+    m = re.fullmatch(r"([0-9]+):([0-9]{2})(?::([0-9]{2}))?", s)
+    if m:
+        return rnd(Decimal(int(m[1])) * 60 + int(m[2]) + Decimal(int(m[3] or 0)) / 60)
+    if re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", s):
+        return rnd(Decimal(s))
+    total = Decimal(0)
+    rest = s
+    found = False
+    for m in re.finditer(r"([0-9]+(?:\.[0-9]+)?)\s*([a-z]+)", s):
+        if m[2] not in UNIT:
+            raise ValueError("unit")
+        total += Decimal(m[1]) * UNIT[m[2]]
+        found = True
+    if not found or re.sub(r"([0-9]+(?:\.[0-9]+)?)\s*([a-z]+)|\s", "", s):
+        raise ValueError("unparsed")
+    return rnd(total)
+`;

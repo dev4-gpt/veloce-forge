@@ -45,6 +45,9 @@ export async function ensureSchema() {
   // Recorded event streams for replay (see replay.ts). Immutable like the chain; their digest is sealed into the round's chain entry.
   await q`create table if not exists round_events (round_id text primary key, family text not null, status text not null, events_json text not null, digest text not null, created_at timestamptz not null default now())`;
   await q`do $d$ begin if not exists (select 1 from pg_trigger where tgname = 'round_events_no_change') then create trigger round_events_no_change before update or delete on round_events for each row execute function report_chain_immutable(); end if; end $d$`;
+  // Fresh audits: one immutable result per promoted tool and audit set (see audit.ts).
+  await q`create table if not exists audits (tool_id text not null, set_sha text not null, family text not null, status text not null check (status in ('passed','failed')), cand_pass_json text not null, prev_tool_id text not null, prev_pass_json text not null, heldout_pass int not null, heldout_total int not null, reasons_json text not null, sandbox_id text, cost_micros bigint, created_at timestamptz not null default now(), primary key (tool_id, set_sha))`;
+  await q`do $d$ begin if not exists (select 1 from pg_trigger where tgname = 'audits_no_change') then create trigger audits_no_change before update or delete on audits for each row execute function report_chain_immutable(); end if; end $d$`;
   // Stripe manual-capture holds (test mode), one per round paid by card. Every state change is a compare-and-set in cardHold.ts.
   await q`create table if not exists card_holds (round_id text primary key, payment_intent text unique, amount_cents int not null, status text not null check (status in ('authorizing','authorized','capturing','captured','releasing','released','failed','unresolved')), captured_cents int, note text, created_at timestamptz not null default now(), updated_at timestamptz not null default now())`;
   schemaReady = true;
@@ -128,7 +131,7 @@ export interface ToolRow {
   version: number;
   code: string;
   sha: string;
-  status: "active" | "proposed" | "rejected" | "superseded" | "blocked";
+  status: "active" | "proposed" | "rejected" | "superseded" | "blocked" | "revoked";
   visible_count: number | null;
   heldout_count: number | null;
   heldout_pass: boolean[] | null;
@@ -232,7 +235,7 @@ export async function finishRoundRow(id: string, status: string, usage: unknown)
 }
 
 // ---------- private held-out sets (never in the public repo) ----------
-export type HeldoutKey = Family | "e2e";
+export type HeldoutKey = Family | "e2e" | `audit:${Family}`;
 
 export interface HeldoutSet {
   family: HeldoutKey;
