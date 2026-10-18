@@ -115,7 +115,7 @@ export async function runRound(opts: {
       }
       emit({ type: "candidate", attempt, model: p.model, rationale: p.rationale, code: p.code, sha: sha256(p.code) });
 
-      const screen = staticScreen(p.code);
+      const screen = staticScreen(p.code, spec.extraImports);
       let candVisible = 0;
       let candHeld: boolean[] = Array(heldIn.length).fill(false);
       if (screen.ok) {

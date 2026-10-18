@@ -6,7 +6,7 @@ import {
   setActiveHeldout, settle, tryStartRound,
 } from "@/lib/db";
 import { runRound, type RoundEvent } from "@/lib/round";
-import { requirePasscode } from "@/lib/auth";
+import { requireRole } from "@/lib/auth";
 
 export const maxDuration = 300;
 
@@ -17,15 +17,15 @@ function cheatCode(family: Family): string {
 }
 
 export async function POST(req: Request) {
-  const denied = requirePasscode(req);
-  if (denied) return denied;
+  const auth = await requireRole(req, ["operator", "admin", "shared"]);
+  if (auth instanceof Response) return auth;
   const body = (await req.json().catch(() => ({}))) as { family?: Family; cheat?: boolean; simulateMissingUsage?: boolean };
   const family = body.family;
   if (!family || !FAMILIES[family]) return Response.json({ error: "family must be dates, money or durations" }, { status: 400 });
 
   await ensureSchema();
   const roundId = "r-" + randomUUID().slice(0, 8);
-  if (!(await tryStartRound(roundId, family))) {
+  if (!(await tryStartRound(roundId, family, auth.identity.id))) {
     return Response.json({ error: "another round is running (free plan allows one sandbox at a time)" }, { status: 409 });
   }
   const enc = new TextEncoder();

@@ -30,6 +30,7 @@ export async function propose(opts: {
   priorAttempt?: { code: string; rejectedBecause: string[] };
 }): Promise<Proposal> {
   const parts = [
+    `Role: ${opts.spec.agentRole}`,
     `Task: ${opts.spec.instruction}`,
     `Current implementation:\n${opts.currentCode}`,
     `Failing visible cases (JSON):\n${JSON.stringify(opts.failures, null, 1)}`,

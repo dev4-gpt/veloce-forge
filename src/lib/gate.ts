@@ -38,7 +38,7 @@ export function scoreOutputs(cases: Case[], out: RunnerOutput): Scored {
 
 // ---- static screen (defence in depth; the sandbox is the real boundary) ----
 const ALLOWED_IMPORTS = new Set([
-  "re", "datetime", "math", "decimal", "fractions", "string", "calendar", "unicodedata", "functools", "itertools", "typing",
+  "re", "datetime", "math", "decimal", "fractions", "string", "calendar", "unicodedata", "functools", "itertools", "typing", "collections",
 ]);
 // Forbidden builtin calls (not preceded by a dot or word char, so re.compile( is fine) and forbidden module words.
 const FORBIDDEN_CALLS = /(^|[^\w.])(open|eval|exec|compile|input|globals|locals|__import__)\s*\(/;
@@ -51,13 +51,14 @@ export interface Screen {
   reasons: string[];
 }
 
-export function staticScreen(code: string): Screen {
+export function staticScreen(code: string, extraImports: readonly string[] = []): Screen {
+  const allowed = new Set([...ALLOWED_IMPORTS, ...extraImports]);
   const reasons: string[] = [];
   if (code.length > MAX_CODE_CHARS) reasons.push(`code longer than ${MAX_CODE_CHARS} characters`);
   if (!/^\s*def\s+normalize\s*\(/m.test(code)) reasons.push("no top-level def normalize(...)");
   for (const m of code.matchAll(/^\s*(?:from\s+([\w.]+)\s+import|import\s+([\w., ]+))/gm)) {
     const mods = (m[1] ? [m[1]] : m[2].split(",")).map((s) => s.trim().split(/\s+as\s+/)[0].split(".")[0]);
-    for (const mod of mods) if (mod && !ALLOWED_IMPORTS.has(mod)) reasons.push(`import not allowed: ${mod}`);
+    for (const mod of mods) if (mod && !allowed.has(mod)) reasons.push(`import not allowed: ${mod}`);
   }
   const call = code.match(FORBIDDEN_CALLS);
   if (call) reasons.push(`forbidden call: ${call[2]}(`);

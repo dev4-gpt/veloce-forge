@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 type Hist = { id: string; version: number; status: string; heldout: number | null; visible: number | null; sha: string; rationale: string | null; gate: { passed: boolean; reasons: string[] } | null; code?: string };
-type Fam = { family: string; title: string; heldoutTotal: number; feedbackTotal: number; heldoutCommitment: string | null; activeId: string; activeVersion: number; activeHeldout: number | null; history: Hist[] };
+type Fam = { family: string; title: string; pillar: string; heldoutTotal: number; feedbackTotal: number; heldoutCommitment: string | null; activeId: string; activeVersion: number; activeHeldout: number | null; history: Hist[] };
 type State = { wallet: { balance: number; held: number }; families: Fam[]; ledger: { id: number; kind: string; amount_micros: number; round_id: string | null; idem_key: string | null; note: string | null }[] };
 type Ev = { type: string; [k: string]: any };
 
@@ -44,7 +44,7 @@ export default function Home() {
   const [notice, setNotice] = useState<string | null>(null);
   const [passcode, setPasscode] = useState("");
   const timeline = useRef<HTMLDivElement>(null);
-  const authHeaders = (): Record<string, string> => (passcode ? { "x-demo-passcode": passcode } : {});
+  const authHeaders = (): Record<string, string> => (passcode ? { "x-demo-passcode": passcode, "x-reviewer-token": passcode } : {});
 
   const refresh = useCallback(async () => {
     const r = await fetch("/api/state", { cache: "no-store" });
@@ -138,7 +138,7 @@ export default function Home() {
         <div className="flex flex-wrap items-center gap-3 rounded-lg border border-zinc-200 px-4 py-2 text-sm dark:border-zinc-800">
           <div><div className="text-xs text-zinc-500">Balance</div><div className="font-mono text-base">{state ? usd(state.wallet.balance) : "…"}</div></div>
           <div><div className="text-xs text-zinc-500">Held</div><div className="font-mono text-base">{state ? usd(state.wallet.held) : "…"}</div></div>
-          <input type="password" value={passcode} onChange={(e) => { setPasscode(e.target.value); try { sessionStorage.setItem("forge-passcode", e.target.value); } catch {} }} placeholder="demo passcode" aria-label="Demo passcode" className="w-32 rounded-md border border-zinc-300 bg-transparent px-2 py-1.5 text-sm dark:border-zinc-700" title="Needed to run rounds, approve tools, or claim demo credits. Viewing is open." />
+          <input type="password" value={passcode} onChange={(e) => { setPasscode(e.target.value); try { sessionStorage.setItem("forge-passcode", e.target.value); } catch {} }} placeholder="access code" aria-label="Access code" className="w-32 rounded-md border border-zinc-300 bg-transparent px-2 py-1.5 text-sm dark:border-zinc-700" title="Your reviewer token (or the shared demo passcode in demo mode). Needed to run rounds, approve tools or claim demo credits. Viewing is open." />
           <button onClick={topup} className="rounded-md bg-indigo-600 px-3 py-1.5 text-white hover:bg-indigo-500" title="Stripe Checkout in test mode; no real charge">Add $5 credits (Stripe test)</button>
           <button onClick={demoCredits} className="rounded-md border border-zinc-300 px-3 py-1.5 hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-900" title="No card. Labelled demo credits, once per day, not a payment.">Claim $5 demo credits</button>
           <button onClick={replay} className="rounded-md border border-zinc-300 px-3 py-1.5 hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-900" title="Re-apply the last top-up through the same idempotent credit path. It must be ignored. (This does not exercise the Stripe signature check.)">Replay credit</button>
@@ -151,21 +151,21 @@ export default function Home() {
         <div className="mb-2 font-medium text-sm">Six pillars of the Veloce AgenticOS workspace: what this demo actually covers</div>
         <div className="grid gap-2 sm:grid-cols-3 lg:grid-cols-6">
           {[
-            ["Command", "not built", "no trusted score yet"],
-            ["Context", "not built", "needs real feedback ingestion"],
-            ["Orchestrate", "thin", "fixed round loop only"],
-            ["Create", "live", "agent writes and tests tools"],
-            ["Govern", "live", "gate, budget, hash-bound approval"],
-            ["Deliver", "not built", "no real outbound delivery"],
+            ["Command", "thin agent", "intent routing, own private test set"],
+            ["Context", "thin agent", "retrieval, own private test set"],
+            ["Orchestrate", "thin", "fixed round loop only; no agent"],
+            ["Create", "agent", "normaliser tools: dates, money, durations"],
+            ["Govern", "agent + gate", "action policy agent; gate, budget, approval"],
+            ["Deliver", "not built", "no trusted score, no real delivery"],
           ].map(([name, status, note]) => (
             <div key={name} className="rounded border border-zinc-200 p-2 dark:border-zinc-800">
               <div className="font-medium">{name}</div>
-              <div className={status === "live" ? "text-emerald-600" : status === "thin" ? "text-amber-600" : "text-zinc-500"}>{status}</div>
+              <div className={status === "not built" ? "text-zinc-500" : status === "thin" ? "text-amber-600" : "text-emerald-600"}>{status}</div>
               <div className="text-zinc-500">{note}</div>
             </div>
           ))}
         </div>
-        <div className="mt-2 text-zinc-500">One self-improving loop is implemented and tested. Per-pillar agents are future work, not shown here.</div>
+        <div className="mt-2 text-zinc-500">One shared governance loop (budget, gate, approval) runs a separate agent per pillar, each with its own role, task rules and private test set. Command, Context and Govern are new and thin: their benchmarks are tested, but they have not yet been run in live sandbox rounds. Orchestrate and Deliver have no trustworthy automatic score yet.</div>
       </section>
 
       <section className="grid gap-4 md:grid-cols-3">
@@ -174,7 +174,7 @@ export default function Home() {
           return (
             <div key={f.family} className="rounded-lg border border-zinc-200 p-4 dark:border-zinc-800">
               <div className="flex items-baseline justify-between">
-                <h2 className="font-medium">{f.title}</h2>
+                <div><h2 className="font-medium">{f.title}</h2><div className="text-[11px] uppercase tracking-wide text-zinc-500">{f.pillar} pillar</div></div>
                 <span className="font-mono text-xs text-zinc-500">v{f.activeVersion}</span>
               </div>
               <div className="mt-2 text-xs text-zinc-500">Held-out pass rate (hidden cases)</div>

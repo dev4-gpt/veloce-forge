@@ -1,5 +1,6 @@
 // Neon Postgres access: wallet + append-only ledger, tool library, approvals, Stripe event dedupe.
 // Every money movement is one atomic SQL statement keyed by a unique idempotency key.
+import { randomBytes } from "node:crypto";
 import { neon } from "@neondatabase/serverless";
 import { FAMILIES, type Family, sha256 } from "./bench/cases";
 
@@ -33,6 +34,9 @@ export async function ensureSchema() {
   await q`create table if not exists approvals (id bigserial primary key, tool_id text not null, decision text not null, sha_at_decision text not null, created_at timestamptz not null default now())`;
   await q`create table if not exists heldout_sets (family text primary key, sha text not null, cases_json text not null, updated_at timestamptz not null default now())`;
   await q`create table if not exists rounds (id text primary key, family text not null, status text not null, usage_json text, created_at timestamptz not null default now())`;
+  await q`create table if not exists reviewers (id text primary key, name text not null, role text not null check (role in ('operator','reviewer','admin')), token_hash text not null unique, disabled boolean not null default false, created_at timestamptz not null default now())`;
+  await q`alter table approvals add column if not exists reviewer_id text`;
+  await q`alter table rounds add column if not exists started_by text`;
   await q`create unique index if not exists one_running_round on rounds ((1)) where status = 'running'`;
   schemaReady = true;
 }
@@ -178,16 +182,23 @@ export async function listTools(family: Family): Promise<ToolRow[]> {
 /** Approval is bound to the code hash: the caller passes the hash it reviewed; it must equal the hash recomputed from the
  *  stored code AND match the row, and the approval record, the supersede of the old active tool and the promotion
  *  happen in ONE statement, so no partial state can be left behind. */
-export async function review(toolId: string, decision: "approve" | "reject", shaReviewed: string): Promise<{ ok: boolean; error?: string }> {
+export async function review(toolId: string, decision: "approve" | "reject", shaReviewed: string, reviewerId: string | null = null): Promise<{ ok: boolean; error?: string }> {
   const t = await getTool(toolId);
   if (!t) return { ok: false, error: "tool not found" };
   if (t.status !== "proposed") return { ok: false, error: `tool is ${t.status}, not proposed` };
   const actual = sha256(t.code);
   if (shaReviewed !== actual || t.sha !== actual) return { ok: false, error: "hash mismatch: the code changed after review" };
+  // Separation of duties: the identity that started the round that produced this tool cannot approve or reject it.
+  if (reviewerId && t.round_id) {
+    const starter = (await sql()`select started_by from rounds where id = ${t.round_id}`) as { started_by: string | null }[];
+    if (starter[0]?.started_by && starter[0].started_by === reviewerId) {
+      return { ok: false, error: "separation of duties: the person who started this round cannot review its result" };
+    }
+  }
   const approve = decision === "approve";
   const r = (await sql()`
     with cand as (select id, family from tools where id = ${toolId} and status = 'proposed' and sha = ${actual}),
-    appr as (insert into approvals(tool_id, decision, sha_at_decision) select id, ${decision}::text, ${actual}::text from cand returning 1),
+    appr as (insert into approvals(tool_id, decision, sha_at_decision, reviewer_id) select id, ${decision}::text, ${actual}::text, ${reviewerId}::text from cand returning 1),
     sup as (update tools set status = 'superseded' where ${approve}::boolean and status = 'active' and family = (select family from cand) and exists (select 1 from cand) returning 1),
     act as (update tools set status = case when ${approve}::boolean then 'active' else 'rejected' end where id in (select id from cand) returning 1)
     select (select count(*) from cand) as n`) as any[];
@@ -196,10 +207,10 @@ export async function review(toolId: string, decision: "approve" | "reject", sha
 
 /** Atomically claim the single "running" slot. Stale rows (older than 3 minutes) are expired first so a crashed
  *  round cannot block the system forever. A unique partial index makes concurrent claims impossible. */
-export async function tryStartRound(id: string, family: Family): Promise<boolean> {
+export async function tryStartRound(id: string, family: Family, startedBy: string | null = null): Promise<boolean> {
   await sql()`update rounds set status = 'abandoned' where status = 'running' and created_at < now() - interval '3 minutes'`;
   try {
-    await sql()`insert into rounds(id, family, status) values (${id}, ${family}, 'running')`;
+    await sql()`insert into rounds(id, family, status, started_by) values (${id}, ${family}, 'running', ${startedBy})`;
     return true;
   } catch (e) {
     if (String((e as Error)?.message ?? e).toLowerCase().includes("duplicate key") || (e as { code?: string })?.code === "23505") return false;
@@ -232,4 +243,30 @@ export async function seedHeldoutSet(family: Family, cases: HeldoutSet["cases"])
   await sql()`insert into heldout_sets(family, sha, cases_json) values (${family}, ${sha}, ${json}) on conflict (family) do update set sha = excluded.sha, cases_json = excluded.cases_json, updated_at = now()`;
   await sql()`update tools set heldout_pass_json = null, heldout_count = null where family = ${family}`;
   return { changed: true, sha };
+}
+
+// ---------- reviewer identities ----------
+export type Role = "operator" | "reviewer" | "admin";
+export interface ReviewerRow {
+  id: string;
+  name: string;
+  role: Role;
+}
+
+/** Create a reviewer. The token is returned ONCE and only its SHA-256 is stored. */
+export async function createReviewer(name: string, role: Role): Promise<{ id: string; token: string }> {
+  const token = randomBytes(24).toString("base64url");
+  const id = "u-" + randomBytes(5).toString("hex");
+  await sql()`insert into reviewers(id, name, role, token_hash) values (${id}, ${name}, ${role}, ${sha256(token)})`;
+  return { id, token };
+}
+
+export async function findReviewerByToken(token: string): Promise<ReviewerRow | null> {
+  const r = (await sql()`select id, name, role from reviewers where token_hash = ${sha256(token)} and disabled = false`) as ReviewerRow[];
+  return r[0] ?? null;
+}
+
+export async function countReviewers(): Promise<number> {
+  const r = (await sql()`select count(*) as n from reviewers where disabled = false`) as { n: number }[];
+  return Number(r[0].n);
 }

@@ -13,6 +13,7 @@ export async function GET() {
       return {
         family: f,
         title: FAMILIES[f].title,
+        pillar: FAMILIES[f].pillar,
         heldoutTotal: held ? held.cases.length : 0,
         feedbackTotal: FAMILIES[f].visible.length + FAMILIES[f].field.length,
         heldoutCommitment: held ? held.sha : null,
