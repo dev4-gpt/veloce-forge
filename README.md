@@ -57,6 +57,32 @@ npx tsx --env-file=.env.local scripts/run-round.ts dates   # one real round from
 node --env-file=.env.local scripts/smoke-sandbox.mjs       # sandbox smoke test
 ```
 
+## Tamper-evident round reports
+
+Every round and every approval is appended to a hash chain (`report_chain`): each entry's hash covers its content and the previous hash, and can be Ed25519-signed (`REPORT_SIGNING_KEY`). Export it from `/api/evidence` (needs the passcode or a reviewer token) and check it offline, with a script that imports nothing from this repo:
+
+```bash
+node scripts/verify-report.mjs evidence.json --pubkey <base64 public key> --head <hash you saved last time>
+```
+
+It detects edited, removed or reordered entries, forged signatures (when you pin the key), approvals that do not match the code a round produced, and promotions whose own recorded numbers break the gate. It does **not** prove that the sandbox really ran or that the scores are true, and without a pinned key or a saved head hash it cannot catch someone who rewrites or truncates the whole chain. Rounds before this feature have no entries. If recording a report fails, the round still completes and the UI shows a warning.
+
+## Replay of recorded runs
+
+Each finished round's event stream is stored (`round_events`, immutable) and its digest is sealed into that round's chain entry. The timeline panel can replay any recorded run with its original pacing (long silences shortened) without a passcode, a sandbox, a model call or any money: replay is read-only code that cannot reach the wallet, and every replayed line is tagged `replay: true` and shown with a violet "replay" badge and a banner. The replay header says whether the stored events still match the sealed report. Limits: only rounds run after this feature existed are recorded (older rounds show as history cards only), and the seal shows the stream was not edited afterwards, not that the original live run was honest.
+
+## Paying for a round with a Stripe card hold (test mode)
+
+Besides the credit wallet, a round can be paid with a Stripe manual-capture card hold (checkbox in the UI, or `payWith: "card_hold"` in `POST /api/rounds`): a 50¢ authorisation is placed before any sandbox exists, the round runs, then the hold is captured or released. Test mode only: `STRIPE_SECRET_KEY` must be `sk_test_`/`rk_test_` and live-mode objects are refused. Every state change is a compare-and-set with Stripe idempotency keys, so a retry cannot capture twice; a capture or release whose response is lost is `pending` and `POST /api/holds {action:"reconcile"}` finishes it from what Stripe says.
+
+What was verified against real Stripe test mode (`scripts/stripe-hold-smoke.ts`): the 50¢ authorisation, cancel, idempotent create, a refused second capture, and that **Stripe refuses any capture under $0.50**. So a card round cannot bill its exact few-cent cost: a finished round is charged the 50¢ minimum (use the wallet for exact metering). With `CARD_CAPTURE_POLICY=on_green` only a round that produces a gate-passing proposal is charged and every other completed round is released. A round that fails before any sandbox ran is released. If usage is unknown, nothing is captured or released: the hold is parked as `unresolved` for a person (`release_unresolved`), and reconcile never decides that by itself. Not covered: saving a customer's own card (it uses Stripe's published test card `pm_card_visa`), Stripe webhooks for holds, and any live-mode use.
+
+## Fresh audit after promotion
+
+A held-out set is used to choose between candidates, so the score of the winner is biased upward. Each family can also have a **frozen audit set** (`audit:<family>`, private, never shown to the proposer, never part of any promotion decision). After a person approves a tool, the server scores it once on that set, in a sandbox with outbound access proven blocked, against the version it replaced. The audit fails if the audit score dropped, if any case the old version passed now fails, or if the held-out rate is more than 3/10 above the audit rate (the signature of selecting for the held-out set). The result is stored (`audits`, immutable), sealed into the hash chain (the offline verifier re-checks the numbers), and shown on the family card as `audit passed` or `AUDIT FAILED`. A failed audit does not undo anything by itself: a reviewer can **revoke** the tool, which brings back the version it replaced in a single statement (never leaving the family without an active tool). If no audit set is configured, the wallet is empty or the sandbox fails, the tool is reported as unaudited (the failure to audit is visible, and it is not counted as a failed audit).
+
+Seed the sets with `npx tsx --env-file=.env --env-file=.env.local scripts/seed-heldout.ts` (reads `private/heldout.json` and `private/audit.json`, refuses an audit input that also appears in the held-out set). Limits: every audit still reveals a little about the set to whoever reads the results, so refresh the set from time to time (a new set has a new commitment and is audited separately); ten cases per family is a small sample, so the 3/10 gap rule is deliberately loose; the audit costs a sandbox run and one of the daily free-plan sandboxes.
+
 ## Prior work and attribution
 
 The author's earlier project, **Veloce AgenticOS** (a governed AI workspace), is prior work and inspired the invariants above (budget reservation and settlement, hash-bound approval). **No Veloce code was copied into this repository; everything here was written during the hackathon.** This project is not affiliated with CreateOS, Stripe or Google. Third-party: CreateOS Sandbox REST API, Stripe (test mode), Neon, Vercel, Gemini API, Next.js, `@neondatabase/serverless`, `stripe`, `tsx`.

@@ -13,7 +13,7 @@ export interface Scored {
   count: number;
 }
 
-export function scoreOutputs(cases: Case[], out: RunnerOutput): Scored {
+export function scoreOutputs(cases: Case[], out: RunnerOutput, scorer?: (c: Case, got: unknown) => boolean): Scored {
   const n = cases.length;
   if ("load_error" in out || !("outputs" in out) || out.outputs.length !== n) {
     const msg = "load_error" in out ? out.load_error : "runner returned the wrong number of outputs";
@@ -26,7 +26,7 @@ export function scoreOutputs(cases: Case[], out: RunnerOutput): Scored {
     if ("ok" in o) {
       got.push(o.ok);
       errors.push(null);
-      pass.push(equalValue(o.ok, cases[i].expected));
+      pass.push(scorer ? scorer(cases[i], o.ok) : equalValue(o.ok, cases[i].expected));
     } else {
       got.push(null);
       errors.push(o.err);
@@ -38,7 +38,7 @@ export function scoreOutputs(cases: Case[], out: RunnerOutput): Scored {
 
 // ---- static screen (defence in depth; the sandbox is the real boundary) ----
 const ALLOWED_IMPORTS = new Set([
-  "re", "datetime", "math", "decimal", "fractions", "string", "calendar", "unicodedata", "functools", "itertools", "typing",
+  "re", "datetime", "math", "decimal", "fractions", "string", "calendar", "unicodedata", "functools", "itertools", "typing", "collections",
 ]);
 // Forbidden builtin calls (not preceded by a dot or word char, so re.compile( is fine) and forbidden module words.
 const FORBIDDEN_CALLS = /(^|[^\w.])(open|eval|exec|compile|input|globals|locals|__import__)\s*\(/;
@@ -46,18 +46,24 @@ const FORBIDDEN_TOKENS = ["__builtins__", "subprocess", "socket", "urllib", "req
 const FORBIDDEN_WORDS = /\b(os|sys)\./;
 const MAX_CODE_CHARS = 8000;
 
+/** The import allowlist for a pillar, as a list (passed to the sandbox runners and the AST screen). */
+export function allowedImports(extra: readonly string[] = []): string[] {
+  return [...new Set([...ALLOWED_IMPORTS, ...extra])];
+}
+
 export interface Screen {
   ok: boolean;
   reasons: string[];
 }
 
-export function staticScreen(code: string): Screen {
+export function staticScreen(code: string, extraImports: readonly string[] = []): Screen {
+  const allowed = new Set([...ALLOWED_IMPORTS, ...extraImports]);
   const reasons: string[] = [];
   if (code.length > MAX_CODE_CHARS) reasons.push(`code longer than ${MAX_CODE_CHARS} characters`);
   if (!/^\s*def\s+normalize\s*\(/m.test(code)) reasons.push("no top-level def normalize(...)");
   for (const m of code.matchAll(/^\s*(?:from\s+([\w.]+)\s+import|import\s+([\w., ]+))/gm)) {
     const mods = (m[1] ? [m[1]] : m[2].split(",")).map((s) => s.trim().split(/\s+as\s+/)[0].split(".")[0]);
-    for (const mod of mods) if (mod && !ALLOWED_IMPORTS.has(mod)) reasons.push(`import not allowed: ${mod}`);
+    for (const mod of mods) if (mod && !allowed.has(mod)) reasons.push(`import not allowed: ${mod}`);
   }
   const call = code.match(FORBIDDEN_CALLS);
   if (call) reasons.push(`forbidden call: ${call[2]}(`);
@@ -79,7 +85,12 @@ export interface GateDecision {
   reasons: string[];
 }
 
-export function decideGate(current: Standing, candidate: Standing, screen: Screen): GateDecision {
+export interface CrossCheck {
+  currentPass: boolean[]; // sealed end-to-end set with the CURRENT tool of this pillar
+  candidatePass: boolean[]; // same set with the CANDIDATE swapped in (partner pillar unchanged)
+}
+
+export function decideGate(current: Standing, candidate: Standing, screen: Screen, cross?: CrossCheck): GateDecision {
   const reasons: string[] = [];
   if (!screen.ok) reasons.push(...screen.reasons.map((r) => `static screen: ${r}`));
   const curH = current.heldoutPass.filter(Boolean).length;
@@ -88,6 +99,13 @@ export function decideGate(current: Standing, candidate: Standing, screen: Scree
   const regressed = current.heldoutPass.flatMap((p, i) => (p && !candidate.heldoutPass[i] ? [i] : []));
   if (regressed.length) reasons.push(`regression on ${regressed.length} held-out case(s) the current tool passed`);
   if (candidate.visibleCount < current.visibleCount) reasons.push("visible score dropped");
+  if (cross) {
+    const cur = cross.currentPass.filter(Boolean).length;
+    const cand = cross.candidatePass.filter(Boolean).length;
+    if (cand < cur) reasons.push(`cross-pillar: end-to-end score dropped (${cand} < ${cur})`);
+    const broke = cross.currentPass.flatMap((p, i) => (p && !cross.candidatePass[i] ? [i] : []));
+    if (broke.length) reasons.push(`cross-pillar: end-to-end regression on ${broke.length} case(s) that passed before`);
+  }
   return { passed: reasons.length === 0, reasons };
 }
 
@@ -96,4 +114,13 @@ export function decideGate(current: Standing, candidate: Standing, screen: Scree
 // (timeout, DNS failure, connection refused, crash) counts as blocked, which is the safe direction.
 export function egressBlocked(exitCode: number, stdout: string): boolean {
   return !(exitCode === 0 && stdout.includes("REACHED"));
+}
+
+/** What the model may be told about a rejection. Held-out counts and regression details stay server-side:
+ *  repeated queries of aggregate held-out scores would let the proposer overfit to the hidden set. */
+export function feedbackSafeReasons(reasons: string[]): string[] {
+  const safe = reasons.filter((r) => r.startsWith("static screen:"));
+  const hidden = reasons.length - safe.length;
+  if (hidden > 0) safe.push("the candidate did not generalise well enough to unseen cases; handle more format variants without hardcoding");
+  return safe;
 }

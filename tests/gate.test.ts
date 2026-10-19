@@ -2,7 +2,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { FAMILIES, FAMILY_LIST } from "../src/lib/bench/cases";
-import { decideGate, egressBlocked, scoreOutputs, staticScreen } from "../src/lib/gate";
+import { existsSync, readFileSync } from "node:fs";
+import { decideGate, egressBlocked, feedbackSafeReasons, scoreOutputs, staticScreen } from "../src/lib/gate";
 
 const ok = staticScreen("import re\ndef normalize(raw):\n    return raw.strip()\n");
 
@@ -45,14 +46,16 @@ test("a screen failure blocks promotion even with a perfect score", () => {
   assert.equal(decideGate(cur, perfect, bad).passed, false);
 });
 
-test("a hardcoding candidate passes visible but fails held-out and is rejected", () => {
+test("a hardcoding candidate passes the feedback cases but fails unseen cases and is rejected", () => {
   const spec = FAMILIES.dates;
-  const visibleOnly = scoreOutputs(spec.visible, { outputs: spec.visible.map((c) => ({ ok: c.expected })) });
-  const heldOut = scoreOutputs(spec.heldout, { outputs: spec.heldout.map(() => ({ err: "ValueError: nope" })) });
-  assert.equal(visibleOnly.count, spec.visible.length);
+  const feedback = [...spec.visible, ...spec.field];
+  const unseen = [{ input: "x1", expected: "a" }, { input: "x2", expected: "b" }, { input: "x3", expected: "c" }];
+  const seen = scoreOutputs(feedback, { outputs: feedback.map((c) => ({ ok: c.expected })) });
+  const heldOut = scoreOutputs(unseen, { outputs: unseen.map(() => ({ err: "ValueError: nope" })) });
+  assert.equal(seen.count, feedback.length);
   assert.equal(heldOut.count, 0);
-  const cur = { visibleCount: 1, heldoutPass: spec.heldout.map(() => false) };
-  assert.equal(decideGate(cur, { visibleCount: visibleOnly.count, heldoutPass: heldOut.pass }, ok).passed, false);
+  const cur = { visibleCount: 1, heldoutPass: unseen.map(() => false) };
+  assert.equal(decideGate(cur, { visibleCount: seen.count, heldoutPass: heldOut.pass }, ok).passed, false);
 });
 
 test("scoring is type strict and handles wrong output counts", () => {
@@ -63,12 +66,29 @@ test("scoring is type strict and handles wrong output counts", () => {
   assert.equal(scoreOutputs(cases, { load_error: "boom" }).count, 0);
 });
 
-test("benchmark is well formed: held-out never overlaps visible", () => {
+test("public benchmark is well formed and contains NO held-out cases", () => {
+  for (const f of FAMILY_LIST) {
+    assert.equal("heldout" in FAMILIES[f], false, `${f}: held-out cases must not live in the public spec`);
+    const all = [...FAMILIES[f].visible, ...FAMILIES[f].field].map((c) => c.input);
+    assert.equal(new Set(all).size, all.length, `${f}: duplicate feedback inputs`);
+  }
+});
+
+test("a private held-out file, when present locally, does not overlap the public cases", () => {
+  if (!existsSync("private/heldout.json")) return; // not available in CI or on a fresh clone
+  const priv = JSON.parse(readFileSync("private/heldout.json", "utf8"));
   for (const f of FAMILY_LIST) {
     const seen = new Set([...FAMILIES[f].visible, ...FAMILIES[f].field].map((c) => c.input));
-    for (const h of FAMILIES[f].heldout) assert.equal(seen.has(h.input), false, `${f}: ${h.input} overlaps`);
-    assert.equal(new Set(FAMILIES[f].field.map((c) => c.input)).size, FAMILIES[f].field.length);
+    for (const c of priv[f]) assert.equal(seen.has(c.input), false, `${f}: ${c.input} overlaps the public feedback set`);
   }
+});
+
+test("feedback to the model never carries held-out counts or regression details", () => {
+  const reasons = ["held-out 3 does not beat current 1 by 2", "regression on 2 held-out case(s) the current tool passed", "static screen: forbidden token: socket"];
+  const safe = feedbackSafeReasons(reasons).join(" ");
+  assert.match(safe, /static screen: forbidden token: socket/);
+  assert.doesNotMatch(safe, /held-out \d|regression on \d|beat current/);
+  assert.deepEqual(feedbackSafeReasons(["static screen: x"]), ["static screen: x"]);
 });
 
 test("egress verdict fails closed: only an explicit REACHED counts as open", () => {

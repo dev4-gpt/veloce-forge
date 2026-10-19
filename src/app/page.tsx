@@ -2,8 +2,8 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-type Hist = { id: string; version: number; status: string; heldout: number | null; visible: number | null; sha: string; rationale: string | null; gate: { passed: boolean; reasons: string[] } | null; code?: string };
-type Fam = { family: string; title: string; heldoutTotal: number; feedbackTotal: number; heldoutCommitment: string; activeId: string; activeVersion: number; activeHeldout: number | null; history: Hist[] };
+type Hist = { id: string; version: number; status: string; heldout: number | null; visible: number | null; sha: string; stale?: boolean; rationale: string | null; gate: { passed: boolean; reasons: string[] } | null; code?: string; audit?: { status: "passed" | "failed"; reasons: string[] } | null };
+type Fam = { family: string; title: string; pillar: string; heldoutTotal: number; feedbackTotal: number; heldoutCommitment: string | null; auditCommitment?: string | null; crossCheck: { partner: string; total: number; commitment: string | null } | null; activeId: string; activeVersion: number; activeHeldout: number | null; history: Hist[] };
 type State = { wallet: { balance: number; held: number }; families: Fam[]; ledger: { id: number; kind: string; amount_micros: number; round_id: string | null; idem_key: string | null; note: string | null }[] };
 type Ev = { type: string; [k: string]: any };
 
@@ -18,18 +18,25 @@ const chip: Record<string, string> = {
 
 function describe(e: Ev): string {
   switch (e.type) {
-    case "reserved": return `Reserved ${usd(e.capMicros)} before any sandbox exists`;
+    case "reserved": return e.mode === "card_hold" ? `Stripe card hold placed (test mode, ${e.holdCents} cents, ${String(e.paymentIntent).slice(0, 14)}…) before any sandbox exists; only the actual cost will be captured` : `Reserved ${usd(e.capMicros)} before any sandbox exists`;
     case "refused": return `Refused: ${e.reason}. ${e.detail ?? ""}`;
     case "sandbox_created": return `Sandbox ${String(e.id).slice(0, 12)} created in ${Math.round(e.spawnMs)} ms. Egress allowlist: ${e.egress?.join(", ")} (outbound blocked)`;
     case "egress_check": return e.blocked ? `Egress verified from inside the sandbox: a request to ${e.target} failed (blocked)` : `EGRESS NOT BLOCKED: ${e.detail}`;
+    case "cross_baseline": return `Cross-pillar baseline with the active ${e.partner} tool: ${e.passing}/${e.total} sealed end-to-end cases pass`;
+    case "cross_check": return `Cross-pillar check ${e.attempt}: end-to-end ${e.candidate}/${e.total} with the candidate (was ${e.current}); a drop or any broken case blocks promotion`;
+    case "ast_screen": return e.ok ? `Syntax-tree screen ${e.attempt}: candidate passed without being run` : `Syntax-tree screen ${e.attempt}: REJECTED (${(e.reasons as string[]).join("; ")})`;
     case "baseline": return `Current tool: ${e.visible}/${e.visibleTotal} feedback cases, held-out ${e.heldout}/${e.heldoutTotal}`;
     case "visible_failures": return `${e.count} failing feedback case(s) shown to the agent (held-out cases are never shown)`;
     case "candidate": return `Candidate ${e.attempt} from ${e.model}: ${e.rationale}`;
     case "scores": return `Candidate ${e.attempt} scored: feedback ${e.visible}/${e.visibleTotal}, held-out ${e.heldout}/${e.heldoutTotal} (was ${e.previousHeldout})`;
     case "gate": return e.passed ? `Gate ${e.attempt}: PASSED. Waiting for human approval` : `Gate ${e.attempt}: REJECTED. ${(e.reasons as string[]).join("; ")}`;
-    case "settled": return `Settled ${usd(e.actualMicros)}; released ${usd(e.releasedMicros)}`;
+    case "settled": return e.mode === "card_hold" ? (e.waived ? `Card hold released in full (${usd(e.releasedMicros)}); this round was not charged` : `Captured ${usd(e.actualMicros)} from the card hold (Stripe's minimum charge); ${usd(e.releasedMicros)} released back`) : `Settled ${usd(e.actualMicros)}; released ${usd(e.releasedMicros)}`;
     case "blocked_unsettled": return `BLOCKED: ${e.reason}`;
     case "released": return `Hold released: ${e.reason}`;
+    case "report_sealed": return `Report sealed in the hash chain as #${e.seq} (${String(e.hash).slice(0, 12)}…, ${e.signed ? "signed" : "unsigned"})`;
+    case "report_error": return `WARNING: the report could not be recorded (${e.message})`;
+    case "replay_start": return `${e.notice} Recorded ${String(e.recordedAt).slice(0, 19)} · round ${e.roundId} · ${e.family} · ${e.eventCount} events · ${e.integrity?.state === "matches_sealed_report" ? `events match sealed report #${e.integrity.seq}` : e.integrity?.state === "mismatch" ? `INTEGRITY FAILED: ${e.integrity.reason}` : `not sealed (${e.integrity?.reason})`}`;
+    case "replay_end": return `End of replay. This was a recording; nothing above ran just now.`;
     case "sandbox_destroyed": return `Sandbox destroyed`;
     case "result": return `Round result: ${e.status}`;
     case "error": return `Error: ${e.message}`;
@@ -43,12 +50,22 @@ export default function Home() {
   const [running, setRunning] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [passcode, setPasscode] = useState("");
+  const [recordings, setRecordings] = useState<{ roundId: string; family: string; status: string; recordedAt: string; eventCount: number }[]>([]);
+  const [pick, setPick] = useState("");
+  const [replaying, setReplaying] = useState(false);
+  const [cardHold, setCardHold] = useState(false);
   const timeline = useRef<HTMLDivElement>(null);
-  const authHeaders = (): Record<string, string> => (passcode ? { "x-demo-passcode": passcode } : {});
+  const authHeaders = (): Record<string, string> => (passcode ? { "x-demo-passcode": passcode, "x-reviewer-token": passcode } : {});
 
   const refresh = useCallback(async () => {
     const r = await fetch("/api/state", { cache: "no-store" });
     if (r.ok) setState(await r.json());
+    const rr = await fetch("/api/replay", { cache: "no-store" }).catch(() => null);
+    if (rr?.ok) {
+      const list = (await rr.json()).recordings ?? [];
+      setRecordings(list);
+      setPick((p) => p || list[0]?.roundId || "");
+    }
   }, []);
 
   useEffect(() => {
@@ -96,7 +113,7 @@ export default function Home() {
     setEvents([]);
     setNotice(null);
     try {
-      const res = await fetch("/api/rounds", { method: "POST", headers: authHeaders(), body: JSON.stringify({ family, ...opts }) });
+      const res = await fetch("/api/rounds", { method: "POST", headers: authHeaders(), body: JSON.stringify({ family, ...opts, payWith: cardHold ? "card_hold" : "wallet" }) });
       if (!res.ok || !res.body) {
         const j = await res.json().catch(() => ({}));
         setEvents([{ type: "error", message: j.error ?? `HTTP ${res.status}` }]);
@@ -119,14 +136,43 @@ export default function Home() {
     }
   }
 
-  async function reviewTool(id: string, sha: string, decision: "approve" | "reject") {
+  // Plays a STORED stream back. It never calls /api/rounds, so no sandbox starts, no model is called and no money moves.
+  async function playRecording(roundId: string) {
+    setReplaying(true);
+    setEvents([]);
+    setNotice(null);
+    try {
+      const res = await fetch(`/api/replay/${encodeURIComponent(roundId)}`, { cache: "no-store" });
+      if (!res.ok || !res.body) {
+        const j = await res.json().catch(() => ({}));
+        setEvents([{ type: "error", message: j.error ?? `HTTP ${res.status}` }]);
+        return;
+      }
+      const reader = res.body.getReader();
+      const dec = new TextDecoder();
+      let buf = "";
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        const lines = buf.split("\n");
+        buf = lines.pop() ?? "";
+        for (const l of lines) if (l.trim()) setEvents((p) => [...p, JSON.parse(l)]);
+      }
+    } finally {
+      setReplaying(false);
+    }
+  }
+
+  async function reviewTool(id: string, sha: string, decision: "approve" | "reject" | "revoke") {
     const r = await fetch(`/api/tools/${id}/review`, { method: "POST", headers: authHeaders(), body: JSON.stringify({ decision, sha }) });
     const j = await r.json();
-    setNotice(r.ok ? (decision === "approve" ? "Approved and promoted. The library now uses this version." : "Rejected.") : `Review refused: ${j.error}`);
+    setNotice(r.ok ? (decision === "approve" ? `Approved and promoted. The library now uses this version. Fresh audit: ${j.audit?.status === "skipped" ? `skipped (${j.audit.reason})` : j.audit?.status ?? "not run"}.` : decision === "revoke" ? "Revoked. The previous version is active again." : "Rejected.") : `Review refused: ${j.error}`);
     refresh();
   }
 
   const proposals = state?.families.flatMap((f) => f.history.filter((h) => h.status === "proposed").map((h) => ({ ...h, family: f.title }))) ?? [];
+  const isReplay = replaying || events.some((e) => e.replay === true);
 
   return (
     <main className="mx-auto w-full max-w-6xl px-4 py-6 sm:px-6">
@@ -138,10 +184,10 @@ export default function Home() {
         <div className="flex flex-wrap items-center gap-3 rounded-lg border border-zinc-200 px-4 py-2 text-sm dark:border-zinc-800">
           <div><div className="text-xs text-zinc-500">Balance</div><div className="font-mono text-base">{state ? usd(state.wallet.balance) : "…"}</div></div>
           <div><div className="text-xs text-zinc-500">Held</div><div className="font-mono text-base">{state ? usd(state.wallet.held) : "…"}</div></div>
-          <input type="password" value={passcode} onChange={(e) => { setPasscode(e.target.value); try { sessionStorage.setItem("forge-passcode", e.target.value); } catch {} }} placeholder="demo passcode" aria-label="Demo passcode" className="w-32 rounded-md border border-zinc-300 bg-transparent px-2 py-1.5 text-sm dark:border-zinc-700" title="Needed to run rounds, approve tools, or claim demo credits. Viewing is open." />
+          <input type="password" value={passcode} onChange={(e) => { setPasscode(e.target.value); try { sessionStorage.setItem("forge-passcode", e.target.value); } catch {} }} placeholder="access code" aria-label="Access code" className="w-32 rounded-md border border-zinc-300 bg-transparent px-2 py-1.5 text-sm dark:border-zinc-700" title="Your reviewer token (or the shared demo passcode in demo mode). Needed to run rounds, approve tools or claim demo credits. Viewing is open." />
           <button onClick={topup} className="rounded-md bg-indigo-600 px-3 py-1.5 text-white hover:bg-indigo-500" title="Stripe Checkout in test mode; no real charge">Add $5 credits (Stripe test)</button>
           <button onClick={demoCredits} className="rounded-md border border-zinc-300 px-3 py-1.5 hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-900" title="No card. Labelled demo credits, once per day, not a payment.">Claim $5 demo credits</button>
-          <button onClick={replay} className="rounded-md border border-zinc-300 px-3 py-1.5 hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-900" title="Re-deliver the last Stripe payment event. It must be ignored.">Replay webhook</button>
+          <button onClick={replay} className="rounded-md border border-zinc-300 px-3 py-1.5 hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-900" title="Re-apply the last top-up through the same idempotent credit path. It must be ignored. (This does not exercise the Stripe signature check.)">Replay credit</button>
         </div>
       </header>
 
@@ -151,21 +197,21 @@ export default function Home() {
         <div className="mb-2 font-medium text-sm">Six pillars of the Veloce AgenticOS workspace: what this demo actually covers</div>
         <div className="grid gap-2 sm:grid-cols-3 lg:grid-cols-6">
           {[
-            ["Command", "not built", "no trusted score yet"],
-            ["Context", "not built", "needs real feedback ingestion"],
-            ["Orchestrate", "thin", "fixed round loop only"],
-            ["Create", "live", "agent writes and tests tools"],
-            ["Govern", "live", "gate, budget, hash-bound approval"],
-            ["Deliver", "not built", "no real outbound delivery"],
+            ["Command", "thin agent", "intent routing, own private test set"],
+            ["Context", "thin agent", "retrieval, own private test set"],
+            ["Orchestrate", "thin agent", "plan policy, scored by a simulator (not live)"],
+            ["Create", "agent", "normaliser tools: dates, money, durations"],
+            ["Govern", "agent + gate", "action policy agent; gate, budget, approval"],
+            ["Deliver", "not built", "no trusted score, no real delivery"],
           ].map(([name, status, note]) => (
             <div key={name} className="rounded border border-zinc-200 p-2 dark:border-zinc-800">
               <div className="font-medium">{name}</div>
-              <div className={status === "live" ? "text-emerald-600" : status === "thin" ? "text-amber-600" : "text-zinc-500"}>{status}</div>
+              <div className={status === "not built" ? "text-zinc-500" : status === "thin" ? "text-amber-600" : "text-emerald-600"}>{status}</div>
               <div className="text-zinc-500">{note}</div>
             </div>
           ))}
         </div>
-        <div className="mt-2 text-zinc-500">One self-improving loop is implemented and tested. Per-pillar agents are future work, not shown here.</div>
+        <div className="mt-2 text-zinc-500">One shared governance loop (budget, gate, approval) runs a separate agent per pillar, each with its own role, task rules and private test set. Command, Context, Govern and Orchestrate are new and thin: their benchmarks are tested, but they have not yet been run in live sandbox rounds. Orchestrate is scored only by a simulator, so treat its results as simulated. Deliver has no trustworthy automatic score yet.</div>
       </section>
 
       <section className="grid gap-4 md:grid-cols-3">
@@ -174,18 +220,24 @@ export default function Home() {
           return (
             <div key={f.family} className="rounded-lg border border-zinc-200 p-4 dark:border-zinc-800">
               <div className="flex items-baseline justify-between">
-                <h2 className="font-medium">{f.title}</h2>
+                <div><h2 className="font-medium">{f.title}</h2><div className="text-[11px] uppercase tracking-wide text-zinc-500">{f.pillar} pillar</div></div>
                 <span className="font-mono text-xs text-zinc-500">v{f.activeVersion}</span>
               </div>
               <div className="mt-2 text-xs text-zinc-500">Held-out pass rate (hidden cases)</div>
               <div className="mt-1 h-2 rounded bg-zinc-100 dark:bg-zinc-800"><div className="h-2 rounded bg-emerald-500" style={{ width: `${pct}%` }} /></div>
               <div className="mt-1 font-mono text-sm">{f.activeHeldout === null ? "not measured yet" : `${f.activeHeldout}/${f.heldoutTotal}`}</div>
-              <div className="mt-2 text-[11px] text-zinc-500" title={f.heldoutCommitment}>held-out commitment sha256 {f.heldoutCommitment.slice(0, 12)}…</div>
+              <div className="mt-2 text-[11px] text-zinc-500" title={f.heldoutCommitment ?? undefined}>{f.heldoutCommitment ? `private held-out set, commitment sha256 ${f.heldoutCommitment.slice(0, 12)}…` : "held-out set not configured"}</div>
+              <div className="mt-1 text-[11px] text-zinc-500" title={f.auditCommitment ?? undefined}>{f.auditCommitment ? `frozen fresh-audit set, commitment sha256 ${f.auditCommitment.slice(0, 12)}… (scored only after a promotion)` : "no fresh-audit set configured: promoted tools stay unaudited"}</div>
+              {f.crossCheck && <div className="mt-1 text-[11px] text-zinc-500">{f.crossCheck.commitment ? `sealed cross-pillar check with ${f.crossCheck.partner}: ${f.crossCheck.total} end-to-end cases` : "cross-pillar check not configured (rounds refuse to run)"}</div>}
               <ul className="mt-3 space-y-1 text-xs">
                 {f.history.slice(0, 4).map((h) => (
                   <li key={h.id} className="flex items-center justify-between gap-2">
                     <span className="font-mono">v{h.version} · {h.heldout ?? "?"}/{f.heldoutTotal}</span>
-                    <span className={`rounded px-1.5 py-0.5 ${chip[h.status] ?? chip.superseded}`}>{h.status}</span>
+                    <span className="flex items-center gap-1">
+                      {h.audit && <span title={h.audit.status === "failed" ? h.audit.reasons.join("; ") : "scored on a frozen audit set that never took part in a promotion decision"} className={`rounded px-1.5 py-0.5 ${h.audit.status === "passed" ? chip.active : chip.rejected}`}>{h.audit.status === "passed" ? "audit passed" : "AUDIT FAILED"}</span>}
+                      {h.status === "active" && h.audit?.status === "failed" && <button onClick={() => reviewTool(h.id, h.sha, "revoke")} className="rounded border border-rose-500 px-1.5 py-0.5 text-rose-700 dark:text-rose-300" title="Take this version out of service; the version it replaced becomes active again">Revoke</button>}
+                      <span className={`rounded px-1.5 py-0.5 ${chip[h.status] ?? chip.superseded}`}>{h.status}</span>
+                    </span>
                   </li>
                 ))}
               </ul>
@@ -199,13 +251,32 @@ export default function Home() {
         })}
       </section>
 
+      <label className="mt-4 flex items-start gap-2 text-xs text-zinc-600 dark:text-zinc-300">
+        <input type="checkbox" checked={cardHold} onChange={(e) => setCardHold(e.target.checked)} className="mt-0.5" />
+        <span>Pay the next round with a <b>Stripe card hold</b> (test mode) instead of wallet credits. The card is held for 50¢ first; a finished round is charged Stripe's 50¢ minimum (it cannot bill the exact few cents), a round that fails before it starts is released, and if usage is unknown the hold is kept for a person to resolve.</span>
+      </label>
+
       <section className="mt-6 grid gap-4 md:grid-cols-2">
         <div className="rounded-lg border border-zinc-200 p-4 dark:border-zinc-800">
-          <h2 className="mb-2 font-medium">Live timeline {running && <span className="ml-2 text-xs text-amber-600">running…</span>}</h2>
+          <h2 className="mb-2 font-medium">
+            {isReplay ? "Replay of a recorded run" : "Live timeline"}
+            {running && <span className="ml-2 text-xs text-amber-600">running…</span>}
+            {isReplay && <span className="ml-2 rounded bg-violet-600 px-1.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-white">replay · not live</span>}
+          </h2>
+          <div className="mb-2 flex flex-wrap items-center gap-2 text-xs">
+            <select value={pick} onChange={(e) => setPick(e.target.value)} disabled={recordings.length === 0 || replaying || running} className="max-w-[16rem] rounded border border-zinc-300 bg-transparent px-2 py-1 dark:border-zinc-700" aria-label="Recorded run to replay">
+              {recordings.length === 0 && <option value="">No recorded runs yet</option>}
+              {recordings.map((r) => <option key={r.roundId} value={r.roundId}>{r.family} · {r.status} · {r.recordedAt.slice(0, 16)} · {r.roundId}</option>)}
+            </select>
+            <button onClick={() => pick && playRecording(pick)} disabled={!pick || replaying || running} className="rounded border border-violet-600 px-3 py-1 text-violet-700 disabled:opacity-40 dark:text-violet-300">{replaying ? "Replaying…" : "Replay (no sandbox, no cost)"}</button>
+          </div>
           <div ref={timeline} className="max-h-96 space-y-1.5 overflow-auto font-mono text-xs">
             {events.length === 0 && <p className="text-zinc-500">Run a round to see each step: reserve, sandbox, candidate, scores, gate, settle.</p>}
             {events.map((e, i) => (
-              <div key={i} className={e.type === "gate" && !e.passed ? "text-rose-600" : e.type === "blocked_unsettled" || e.type === "error" || e.type === "refused" ? "text-rose-600" : e.type === "gate" ? "text-emerald-600" : ""}>• {describe(e)}</div>
+              <div key={i} className={e.replay ? "border-l-2 border-violet-500 pl-2 " : ""}>
+                {e.replay && <span className="mr-1 rounded bg-violet-100 px-1 text-[10px] font-semibold uppercase text-violet-800 dark:bg-violet-900/40 dark:text-violet-200">replay</span>}
+                <span className={e.type === "gate" && !e.passed ? "text-rose-600" : e.type === "blocked_unsettled" || e.type === "error" || e.type === "refused" ? "text-rose-600" : e.type === "gate" ? "text-emerald-600" : ""}>• {describe(e)}</span>
+              </div>
             ))}
           </div>
         </div>
@@ -219,8 +290,9 @@ export default function Home() {
               <div className="mt-1 text-zinc-500">{p.rationale}</div>
               <div className="mt-1 font-mono text-[11px]">code sha256 {p.sha.slice(0, 16)}… (approval is bound to this hash)</div>
               <pre className="mt-2 max-h-48 overflow-auto rounded bg-zinc-50 p-2 text-[11px] dark:bg-zinc-900">{p.code}</pre>
+              {p.stale && <div className="mt-2 rounded bg-red-50 p-2 text-[11px] text-red-800 dark:bg-red-950/40 dark:text-red-200">Stale: scored against a different held-out set than the one in force now, so it cannot be approved. Reject it and re-run the round.</div>}
               <div className="mt-2 flex gap-2">
-                <button onClick={() => reviewTool(p.id, p.sha, "approve")} className="rounded bg-emerald-600 px-3 py-1 text-white">Approve and promote</button>
+                <button onClick={() => reviewTool(p.id, p.sha, "approve")} disabled={p.stale} title={p.stale ? "scored against a different held-out set; re-run the round" : undefined} className="rounded bg-emerald-600 px-3 py-1 text-white disabled:cursor-not-allowed disabled:opacity-40">Approve and promote</button>
                 <button onClick={() => reviewTool(p.id, p.sha, "reject")} className="rounded border border-zinc-300 px-3 py-1 dark:border-zinc-700">Reject</button>
               </div>
             </div>

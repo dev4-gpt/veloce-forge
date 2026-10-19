@@ -1,14 +1,23 @@
 // Neon Postgres access: wallet + append-only ledger, tool library, approvals, Stripe event dedupe.
 // Every money movement is one atomic SQL statement keyed by a unique idempotency key.
+import { randomBytes } from "node:crypto";
 import { neon } from "@neondatabase/serverless";
 import { FAMILIES, type Family, sha256 } from "./bench/cases";
 
-let _sql: ReturnType<typeof neon> | null = null;
-export function sql() {
+type SqlTag = (strings: TemplateStringsArray, ...values: unknown[]) => Promise<unknown[]>;
+let _sql: SqlTag | null = null;
+
+/** Tests inject an in-process Postgres (PGlite) here; production uses Neon over HTTP. */
+export function __setSqlForTests(fn: SqlTag | null) {
+  _sql = fn;
+  schemaReady = false;
+}
+
+export function sql(): SqlTag {
   if (!_sql) {
     const url = process.env.NEON_POSTGRES_CONNECTION_STRING || process.env.DATABASE_URL;
     if (!url) throw new Error("NEON_POSTGRES_CONNECTION_STRING is not set");
-    _sql = neon(url);
+    _sql = neon(url) as unknown as SqlTag;
   }
   return _sql;
 }
@@ -23,7 +32,29 @@ export async function ensureSchema() {
   await q`create table if not exists stripe_events (event_id text primary key, kind text, created_at timestamptz not null default now())`;
   await q`create table if not exists tools (id text primary key, family text not null, version int not null, code text not null, sha text not null, status text not null, visible_count int, heldout_count int, heldout_pass_json text, round_id text, rationale text, gate_json text, created_at timestamptz not null default now())`;
   await q`create table if not exists approvals (id bigserial primary key, tool_id text not null, decision text not null, sha_at_decision text not null, created_at timestamptz not null default now())`;
+  await q`create table if not exists heldout_sets (family text primary key, sha text not null, cases_json text not null, updated_at timestamptz not null default now())`;
   await q`create table if not exists rounds (id text primary key, family text not null, status text not null, usage_json text, created_at timestamptz not null default now())`;
+  await q`create table if not exists reviewers (id text primary key, name text not null, role text not null check (role in ('operator','reviewer','admin')), token_hash text not null unique, disabled boolean not null default false, created_at timestamptz not null default now())`;
+  await q`alter table approvals add column if not exists reviewer_id text`;
+  // The held-out set commitment (heldout_sets.sha) a proposal was scored against; review() refuses an approval if the family's set has since changed.
+  await q`alter table tools add column if not exists heldout_sha text`;
+  await q`alter table rounds add column if not exists started_by text`;
+  // The index below fails if two rows are 'running' (possible on a database that ran the older code, which had no guard).
+  // Keep only the newest running row, and expire any older than 3 minutes, so a first start on an old database cannot fail.
+  await q`update rounds set status = 'abandoned' where status = 'running' and (created_at < now() - interval '3 minutes' or id <> (select id from rounds where status = 'running' order by created_at desc, id desc limit 1))`;
+  await q`create unique index if not exists one_running_round on rounds ((1)) where status = 'running'`;
+  // Tamper-evident report chain (see evidence.ts). body_json is the canonical text that was hashed; rows are never updated or deleted.
+  await q`create table if not exists report_chain (seq bigint primary key, prev text not null, body_json text not null, hash text not null unique, sig text, kid text, created_at timestamptz not null default now())`;
+  await q`create or replace function report_chain_immutable() returns trigger as $f$ begin raise exception 'report_chain is append-only'; end $f$ language plpgsql`;
+  await q`do $d$ begin if not exists (select 1 from pg_trigger where tgname = 'report_chain_no_change') then create trigger report_chain_no_change before update or delete on report_chain for each row execute function report_chain_immutable(); end if; end $d$`;
+  // Recorded event streams for replay (see replay.ts). Immutable like the chain; their digest is sealed into the round's chain entry.
+  await q`create table if not exists round_events (round_id text primary key, family text not null, status text not null, events_json text not null, digest text not null, created_at timestamptz not null default now())`;
+  await q`do $d$ begin if not exists (select 1 from pg_trigger where tgname = 'round_events_no_change') then create trigger round_events_no_change before update or delete on round_events for each row execute function report_chain_immutable(); end if; end $d$`;
+  // Fresh audits: one immutable result per promoted tool and audit set (see audit.ts).
+  await q`create table if not exists audits (tool_id text not null, set_sha text not null, family text not null, status text not null check (status in ('passed','failed')), cand_pass_json text not null, prev_tool_id text not null, prev_pass_json text not null, heldout_pass int not null, heldout_total int not null, reasons_json text not null, sandbox_id text, cost_micros bigint, created_at timestamptz not null default now(), primary key (tool_id, set_sha))`;
+  await q`do $d$ begin if not exists (select 1 from pg_trigger where tgname = 'audits_no_change') then create trigger audits_no_change before update or delete on audits for each row execute function report_chain_immutable(); end if; end $d$`;
+  // Stripe manual-capture holds (test mode), one per round paid by card. Every state change is a compare-and-set in cardHold.ts.
+  await q`create table if not exists card_holds (round_id text primary key, payment_intent text unique, amount_cents int not null, status text not null check (status in ('authorizing','authorized','capturing','captured','releasing','released','failed','unresolved')), captured_cents int, note text, created_at timestamptz not null default now(), updated_at timestamptz not null default now())`;
   schemaReady = true;
 }
 
@@ -105,10 +136,11 @@ export interface ToolRow {
   version: number;
   code: string;
   sha: string;
-  status: "active" | "proposed" | "rejected" | "superseded" | "blocked";
+  status: "active" | "proposed" | "rejected" | "superseded" | "blocked" | "revoked";
   visible_count: number | null;
   heldout_count: number | null;
   heldout_pass: boolean[] | null;
+  heldout_sha: string | null; // commitment of the held-out set this version was scored against (null = unknown, e.g. made before this was recorded)
   round_id: string | null;
   rationale: string | null;
   gate: { passed: boolean; reasons: string[] } | null;
@@ -125,6 +157,7 @@ const toTool = (r: any): ToolRow => ({
   visible_count: r.visible_count === null ? null : Number(r.visible_count),
   heldout_count: r.heldout_count === null ? null : Number(r.heldout_count),
   heldout_pass: r.heldout_pass_json ? JSON.parse(r.heldout_pass_json) : null,
+  heldout_sha: r.heldout_sha ?? null,
   round_id: r.round_id,
   rationale: r.rationale,
   gate: r.gate_json ? JSON.parse(r.gate_json) : null,
@@ -151,8 +184,8 @@ export async function nextVersion(family: Family): Promise<number> {
 }
 
 export async function insertTool(t: Omit<ToolRow, "created_at">) {
-  await sql()`insert into tools(id, family, version, code, sha, status, visible_count, heldout_count, heldout_pass_json, round_id, rationale, gate_json)
-    values (${t.id}, ${t.family}, ${t.version}, ${t.code}, ${t.sha}, ${t.status}, ${t.visible_count}, ${t.heldout_count}, ${t.heldout_pass ? JSON.stringify(t.heldout_pass) : null}, ${t.round_id}, ${t.rationale}, ${t.gate ? JSON.stringify(t.gate) : null})`;
+  await sql()`insert into tools(id, family, version, code, sha, status, visible_count, heldout_count, heldout_pass_json, heldout_sha, round_id, rationale, gate_json)
+    values (${t.id}, ${t.family}, ${t.version}, ${t.code}, ${t.sha}, ${t.status}, ${t.visible_count}, ${t.heldout_count}, ${t.heldout_pass ? JSON.stringify(t.heldout_pass) : null}, ${t.heldout_sha}, ${t.round_id}, ${t.rationale}, ${t.gate ? JSON.stringify(t.gate) : null})`;
 }
 
 export async function getTool(id: string): Promise<ToolRow | null> {
@@ -165,32 +198,110 @@ export async function listTools(family: Family): Promise<ToolRow[]> {
   return r.map(toTool);
 }
 
-/** Approval is bound to the code hash: the caller passes the hash it reviewed, and it must equal the stored code's hash. */
-export async function review(toolId: string, decision: "approve" | "reject", shaReviewed: string): Promise<{ ok: boolean; error?: string }> {
+export const STALE_ERROR = "scored against a different held-out set; re-run the round";
+
+/** A proposal is stale when it was not scored against the held-out set currently stored for its family (or we cannot tell).
+ *  Approving it would skip the current set, so review() refuses; reject is still allowed. */
+export function isStaleProposal(t: Pick<ToolRow, "status" | "heldout_sha">, currentSetSha: string | null): boolean {
+  return t.status === "proposed" && (!t.heldout_sha || t.heldout_sha !== currentSetSha);
+}
+
+/** Approval is bound to the code hash: the caller passes the hash it reviewed; it must equal the hash recomputed from the
+ *  stored code AND match the row, and the approval record, the supersede of the old active tool and the promotion
+ *  happen in ONE statement, so no partial state can be left behind. */
+export async function review(toolId: string, decision: "approve" | "reject", shaReviewed: string, reviewerId: string | null = null): Promise<{ ok: boolean; error?: string }> {
   const t = await getTool(toolId);
   if (!t) return { ok: false, error: "tool not found" };
   if (t.status !== "proposed") return { ok: false, error: `tool is ${t.status}, not proposed` };
   const actual = sha256(t.code);
   if (shaReviewed !== actual || t.sha !== actual) return { ok: false, error: "hash mismatch: the code changed after review" };
-  await sql()`insert into approvals(tool_id, decision, sha_at_decision) values (${toolId}, ${decision}, ${actual})`;
-  if (decision === "approve") {
-    await sql()`update tools set status = 'superseded' where family = ${t.family} and status = 'active'`;
-    await sql()`update tools set status = 'active' where id = ${toolId}`;
-  } else {
-    await sql()`update tools set status = 'rejected' where id = ${toolId}`;
+  // Separation of duties: the identity that started the round that produced this tool cannot approve or reject it.
+  if (reviewerId && t.round_id) {
+    const starter = (await sql()`select started_by from rounds where id = ${t.round_id}`) as { started_by: string | null }[];
+    if (starter[0]?.started_by && starter[0].started_by === reviewerId) {
+      return { ok: false, error: "separation of duties: the person who started this round cannot review its result" };
+    }
   }
-  return { ok: true };
+  const approve = decision === "approve";
+  if (approve) {
+    const cur = (await sql()`select sha from heldout_sets where family = ${t.family}`) as { sha: string }[];
+    if (isStaleProposal(t, cur[0]?.sha ?? null)) return { ok: false, error: STALE_ERROR };
+  }
+  // The held-out check is repeated inside the statement so a set re-seeded between the check above and here cannot slip through.
+  const r = (await sql()`
+    with cand as (select id, family from tools where id = ${toolId} and status = 'proposed' and sha = ${actual}
+      and (not ${approve}::boolean or heldout_sha = (select sha from heldout_sets where heldout_sets.family = tools.family))),
+    appr as (insert into approvals(tool_id, decision, sha_at_decision, reviewer_id) select id, ${decision}::text, ${actual}::text, ${reviewerId}::text from cand returning 1),
+    sup as (update tools set status = 'superseded' where ${approve}::boolean and status = 'active' and family = (select family from cand) and exists (select 1 from cand) returning 1),
+    act as (update tools set status = case when ${approve}::boolean then 'active' else 'rejected' end where id in (select id from cand) returning 1)
+    select (select count(*) from cand) as n`) as any[];
+  return Number(r[0]?.n ?? 0) > 0 ? { ok: true } : { ok: false, error: "tool changed state during review" };
 }
 
-export async function roundIsRunning(): Promise<boolean> {
-  const r = (await sql()`select count(*) as n from rounds where status = 'running' and created_at > now() - interval '3 minutes'`) as any[];
-  return Number(r[0].n) > 0;
-}
-
-export async function startRoundRow(id: string, family: Family) {
-  await sql()`insert into rounds(id, family, status) values (${id}, ${family}, 'running')`;
+/** Atomically claim the single "running" slot. Stale rows (older than 3 minutes) are expired first so a crashed
+ *  round cannot block the system forever. A unique partial index makes concurrent claims impossible. */
+export async function tryStartRound(id: string, family: Family, startedBy: string | null = null): Promise<boolean> {
+  await sql()`update rounds set status = 'abandoned' where status = 'running' and created_at < now() - interval '3 minutes'`;
+  try {
+    await sql()`insert into rounds(id, family, status, started_by) values (${id}, ${family}, 'running', ${startedBy})`;
+    return true;
+  } catch (e) {
+    if (String((e as Error)?.message ?? e).toLowerCase().includes("duplicate key") || (e as { code?: string })?.code === "23505") return false;
+    throw e;
+  }
 }
 
 export async function finishRoundRow(id: string, status: string, usage: unknown) {
   await sql()`update rounds set status = ${status}, usage_json = ${JSON.stringify(usage)} where id = ${id}`;
+}
+
+// ---------- private held-out sets (never in the public repo) ----------
+export type HeldoutKey = Family | "e2e" | `audit:${Family}`;
+
+export interface HeldoutSet {
+  family: HeldoutKey;
+  sha: string;
+  cases: { input: string; expected: string | number }[];
+}
+
+export async function getHeldoutSet(family: HeldoutKey): Promise<HeldoutSet | null> {
+  const r = (await sql()`select sha, cases_json from heldout_sets where family = ${family}`) as any[];
+  return r[0] ? { family, sha: r[0].sha, cases: JSON.parse(r[0].cases_json) } : null;
+}
+
+/** Store a held-out set. If it differs from what was stored, old per-case pass vectors refer to a burned set, so clear them. */
+export async function seedHeldoutSet(family: HeldoutKey, cases: HeldoutSet["cases"]): Promise<{ changed: boolean; sha: string }> {
+  const json = JSON.stringify(cases);
+  const sha = sha256(json);
+  const cur = (await sql()`select sha from heldout_sets where family = ${family}`) as any[];
+  if (cur[0]?.sha === sha) return { changed: false, sha };
+  await sql()`insert into heldout_sets(family, sha, cases_json) values (${family}, ${sha}, ${json}) on conflict (family) do update set sha = excluded.sha, cases_json = excluded.cases_json, updated_at = now()`;
+  await sql()`update tools set heldout_pass_json = null, heldout_count = null where family = ${family}`;
+  return { changed: true, sha };
+}
+
+// ---------- reviewer identities ----------
+export type Role = "operator" | "reviewer" | "admin";
+export interface ReviewerRow {
+  id: string;
+  name: string;
+  role: Role;
+}
+
+/** Create a reviewer. The token is returned ONCE and only its SHA-256 is stored. */
+export async function createReviewer(name: string, role: Role): Promise<{ id: string; token: string }> {
+  const token = randomBytes(24).toString("base64url");
+  const id = "u-" + randomBytes(5).toString("hex");
+  await sql()`insert into reviewers(id, name, role, token_hash) values (${id}, ${name}, ${role}, ${sha256(token)})`;
+  return { id, token };
+}
+
+export async function findReviewerByToken(token: string): Promise<ReviewerRow | null> {
+  const r = (await sql()`select id, name, role from reviewers where token_hash = ${sha256(token)} and disabled = false`) as ReviewerRow[];
+  return r[0] ?? null;
+}
+
+export async function countReviewers(): Promise<number> {
+  const r = (await sql()`select count(*) as n from reviewers where disabled = false`) as { n: number }[];
+  return Number(r[0].n);
 }

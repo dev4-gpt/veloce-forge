@@ -1,6 +1,6 @@
 // Local driver: run one improvement round against the real sandbox and Gemini.
 // Usage: npx tsx --env-file=.env.local scripts/run-round.ts dates|money|durations
-import { FAMILIES, type Family, heldoutHash } from "../src/lib/bench/cases";
+import { FAMILIES, type Family } from "../src/lib/bench/cases";
 import { runRound } from "../src/lib/round";
 
 const family = (process.argv[2] ?? "dates") as Family;
@@ -10,7 +10,7 @@ if (!FAMILIES[family]) {
 }
 
 async function main() {
-  console.log(`family=${family} heldout-commitment=${heldoutHash(family).slice(0, 16)}...`);
+  console.log(`family=${family}`);
   const t0 = Date.now();
   const result = await runRound({
     family,
