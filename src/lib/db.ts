@@ -114,6 +114,40 @@ export async function markBlocked(roundId: string, cap: number, note: string) {
   await sql()`insert into ledger(kind, amount_micros, round_id, idem_key, note) values ('blocked_unsettled', ${cap}, ${roundId}, ${"blocked:" + roundId}, ${note}) on conflict (idem_key) do nothing`;
 }
 
+/** Rounds whose reservation was never settled or released (a failed round with unknown usage, or one the platform killed) and that are no longer running. */
+export async function listStuckHolds(): Promise<{ round_id: string; held_micros: number; note: string | null; status: string | null }[]> {
+  const r = (await sql()`
+    select l.round_id, l.amount_micros as held, (select b.note from ledger b where b.idem_key = 'blocked:' || l.round_id) as note, rd.status
+    from ledger l left join rounds rd on rd.id = l.round_id
+    where l.kind = 'reserve' and l.round_id is not null
+      and not exists (select 1 from ledger x where x.round_id = l.round_id and x.idem_key in ('settle:' || l.round_id, 'release:' || l.round_id, 'operator_release:' || l.round_id))
+      and coalesce(rd.status, 'unknown') <> 'running'
+    order by l.id`) as any[];
+  return r.map((x) => ({ round_id: x.round_id, held_micros: Number(x.held), note: x.note ?? null, status: x.status ?? null }));
+}
+
+/** A person decides to give a stuck hold back. Uses the amount that was actually reserved (never a caller-supplied figure), refuses a
+ *  round that is still running or already settled/released, and is idempotent per round (key operator_release:<round>). */
+export async function releaseStuckHold(roundId: string, who: string): Promise<{ ok: boolean; releasedMicros: number; error?: string }> {
+  const r = (await sql()`
+    with res as (select amount_micros from ledger where idem_key = ${"reserve:" + roundId} and kind = 'reserve'),
+    ok as (
+      select 1 from res
+      where not exists (select 1 from ledger x where x.round_id = ${roundId} and x.idem_key in (${"settle:" + roundId}, ${"release:" + roundId}, ${"operator_release:" + roundId}))
+        and not exists (select 1 from rounds rd where rd.id = ${roundId} and rd.status = 'running')),
+    ins as (
+      insert into ledger(kind, amount_micros, round_id, idem_key, note)
+      select 'release', (select amount_micros from res), ${roundId}, ${"operator_release:" + roundId}, ${"released by " + who} from ok
+      on conflict (idem_key) do nothing returning amount_micros),
+    upd as (
+      update wallet set held_micros = held_micros - (select coalesce(sum(amount_micros), 0) from ins),
+                        balance_micros = balance_micros + (select coalesce(sum(amount_micros), 0) from ins)
+      where id = 1 and exists (select 1 from ins) returning 1)
+    select (select count(*) from ins) as n, (select coalesce(sum(amount_micros), 0) from ins) as amt`) as any[];
+  const n = Number(r[0]?.n ?? 0);
+  return n > 0 ? { ok: true, releasedMicros: Number(r[0].amt) } : { ok: false, releasedMicros: 0, error: "nothing to release: unknown round, still running, or already settled/released" };
+}
+
 export async function recordStripeEvent(eventId: string, kind: string): Promise<boolean> {
   const r = (await sql()`insert into stripe_events(event_id, kind) values (${eventId}, ${kind}) on conflict do nothing returning event_id`) as any[];
   return r.length > 0;

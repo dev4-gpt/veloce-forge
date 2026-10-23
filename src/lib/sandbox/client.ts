@@ -80,3 +80,40 @@ export async function listSandboxes(): Promise<{ id: string; name: string; statu
   const { json } = await call("GET", "/v1/sandboxes?limit=50");
   return (json?.data?.data ?? []).map((s: any) => ({ id: s.id, name: s.name, status: s.status }));
 }
+
+// ---------- leaked sandbox cleanup ----------
+// A round the platform kills (function time limit, crash) never reaches its `finally`, so its sandbox keeps running and, on the free
+// plan (one concurrent sandbox), blocks every later round. Our sandboxes are named vf-<3 letters>-<base36 millisecond time>; the time
+// is in the name, so age can be read without trusting any other field.
+export const STALE_SANDBOX_MS = 6 * 60 * 1000; // a round cannot legitimately run longer than the 300 s function limit
+const OURS = /^vf-[a-z]{3}-([0-9a-z]{6,12})$/;
+
+/** Ids of sandboxes that are ours, still running, and older than maxAgeMs. Anything not named like ours is never returned. */
+export function staleSandboxIds(list: { id: string; name: string; status: string }[], now: number, maxAgeMs = STALE_SANDBOX_MS): string[] {
+  return list.flatMap((s) => {
+    const m = OURS.exec(s.name ?? "");
+    if (!m || s.status === "destroyed") return [];
+    const created = parseInt(m[1], 36);
+    return Number.isFinite(created) && now - created > maxAgeMs ? [s.id] : [];
+  });
+}
+
+export interface ReapDeps {
+  create: (name: string, egress?: string[]) => Promise<Sandbox>;
+  list: () => Promise<{ id: string; name: string; status: string }[]>;
+  destroy: (id: string) => Promise<void>;
+  now: () => number;
+}
+
+/** createSandbox, but when the concurrent-sandbox quota is hit, destroy OUR stale leftovers and try once more. */
+export async function createSandboxReaping(name: string, egress: string[] = LOCKED_EGRESS, deps: ReapDeps = { create: createSandbox, list: listSandboxes, destroy: destroySandbox, now: Date.now }): Promise<Sandbox> {
+  try {
+    return await deps.create(name, egress);
+  } catch (e) {
+    if (!(e instanceof SandboxError) || e.status !== 429 || !/concurrent/i.test(e.message)) throw e;
+    const stale = staleSandboxIds(await deps.list(), deps.now());
+    if (stale.length === 0) throw e; // the running one is recent: a real round may be using it, so do not touch it
+    for (const id of stale) await deps.destroy(id).catch(() => {});
+    return deps.create(name, egress);
+  }
+}

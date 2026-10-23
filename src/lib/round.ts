@@ -6,7 +6,7 @@ import { loadHeldout } from "./heldout";
 import { allowedImports, type CrossCheck, decideGate, egressBlocked, feedbackSafeReasons, type GateDecision, type RunnerOutput, scoreOutputs, staticScreen } from "./gate";
 import { type Failure, propose } from "./gemini";
 import { AST_SCREEN_PY, PIPELINE_PY, RUNNER_PY } from "./sandbox/runnerSource";
-import { createSandbox, destroySandbox, exec, upload } from "./sandbox/client";
+import { createSandboxReaping, destroySandbox, exec, upload } from "./sandbox/client";
 
 export type RoundEvent = { type: string; [k: string]: unknown };
 
@@ -105,7 +105,7 @@ export async function runRound(opts: {
   let sandboxId = opts.sandboxId;
   try {
     if (!sandboxId) {
-      const sb = await createSandbox(`vf-${opts.family.slice(0, 3)}-${Date.now().toString(36)}`);
+      const sb = await createSandboxReaping(`vf-${opts.family.slice(0, 3)}-${Date.now().toString(36)}`);
       sandboxId = sb.id;
       ownSandbox = true;
       emit({ type: "sandbox_created", id: sb.id, spawnMs: sb.spawnMs, egress: ["127.0.0.1"] });

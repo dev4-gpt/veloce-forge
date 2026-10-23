@@ -83,6 +83,11 @@ A held-out set is used to choose between candidates, so the score of the winner 
 
 Seed the sets with `npx tsx --env-file=.env --env-file=.env.local scripts/seed-heldout.ts` (reads `private/heldout.json` and `private/audit.json`, refuses an audit input that also appears in the held-out set). Limits: every audit still reveals a little about the set to whoever reads the results, so refresh the set from time to time (a new set has a new commitment and is audited separately); ten cases per family is a small sample, so the 3/10 gap rule is deliberately loose; the audit costs a sandbox run and one of the daily free-plan sandboxes.
 
+## Operating notes (found in live use)
+
+- **Killed rounds.** A round the platform kills (Vercel's 300 s limit) never reaches its cleanup, so it can leave a wallet hold and a running sandbox. A leaked sandbox of ours (named `vf-xxx-<time>`, older than six minutes) is destroyed automatically when the one-sandbox quota blocks a new round; a recent or foreign sandbox is never touched. Stuck wallet holds are listed at `GET /api/wallet/holds` and given back by a person with `POST /api/wallet/holds {"round":"r-..."}` or `{"all":true}` (recorded in the ledger as `operator_release:<round>`; the amount is the one actually reserved, and a running or already settled round is refused).
+- **Rounds from before the chain.** `scripts/declare-legacy.ts <tool id>` appends an `epoch` entry saying a tool's round happened before the report chain existed, so the offline verifier accepts a decision on it that has no round entry. It excuses only the tools it names, and a tool that also has a round entry in the chain is flagged.
+
 ## Prior work and attribution
 
 The author's earlier project, **Veloce AgenticOS** (a governed AI workspace), is prior work and inspired the invariants above (budget reservation and settlement, hash-bound approval). **No Veloce code was copied into this repository; everything here was written during the hackathon.** This project is not affiliated with CreateOS, Stripe or Google. Third-party: CreateOS Sandbox REST API, Stripe (test mode), Neon, Vercel, Gemini API, Next.js, `@neondatabase/serverless`, `stripe`, `tsx`.

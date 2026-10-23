@@ -13,7 +13,7 @@ import { __setSqlForTests, ensureSchema, sql } from "../src/lib/db";
 import { appendReport, readChain } from "../src/lib/chainStore";
 import {
   canonical, entryHash, GENESIS, loadSigner, makeEntry, sha256hex, summariseEvents, verifyChain,
-  type AuditBody, type DecisionBody, type Entry, type ReportBody, type RoundBody,
+  type AuditBody, type DecisionBody, type EpochBody, type Entry, type ReportBody, type RoundBody,
 } from "../src/lib/evidence";
 // @ts-ignore plain .mjs on purpose: the offline verifier has no build step and no TypeScript
 import { verify as offlineVerifyRaw } from "../scripts/verify-report.mjs";
@@ -215,6 +215,35 @@ test("revoke needs an earlier approval, happens once, and the separation-of-duti
   assert.equal(both(chain([round({ startedBy: "u-op" }), decision({ reviewerId: "u-rev" }), decision({ decision: "revoke", reviewerId: "u-op" })])).ok, true);
   // ...but still may not approve it
   both(chain([round({ startedBy: "u-op" }), decision({ reviewerId: "u-op" })]), {}, "separation of duties");
+});
+
+
+// ---------- pre-chain (legacy) tools ----------
+const epoch = (ids: string[] = ["t-dates-r-1"], over: Partial<EpochBody> = {}): EpochBody => ({ kind: "epoch", legacyToolIds: ids, note: "before the chain", at: "2026-10-23T01:00:00.000Z", ...over });
+
+test("a decision on a tool whose round predates the chain is accepted once an epoch entry declares it, wherever that entry sits", () => {
+  both(chain([decision()]), {}, "no earlier round entry");
+  assert.equal(both(chain([decision(), epoch()])).ok, true); // declared AFTER the decision it explains: entries cannot be inserted earlier
+  assert.equal(both(chain([epoch(), decision()])).ok, true);
+});
+
+test("the epoch declaration only excuses the tools it names", () => {
+  both(chain([decision({ toolId: "t-other" }), epoch()]), {}, "no earlier round entry");
+});
+
+test("a tool declared legacy must not also have a round entry in the chain", () => {
+  both(chain([round(), epoch()]), {}, "declared as pre-chain");
+});
+
+test("an epoch entry needs a real list of tool ids", () => {
+  both(chain([epoch([])]), {}, "without a valid legacy tool list");
+  both(chain([epoch([42 as unknown as string])]), {}, "without a valid legacy tool list");
+});
+
+test("a legacy approval still allows its later audit and revoke, and an approval still cannot happen twice", () => {
+  const ok = chain([decision(), epoch(), audit(), decision({ decision: "revoke", reviewerId: "u-rev2" })]);
+  assert.equal(both(ok).ok, true);
+  both(chain([decision(), decision(), epoch()]), {}, "decided more than once");
 });
 
 // ---------- events ----------
