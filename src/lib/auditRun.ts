@@ -10,7 +10,7 @@ import { ensureSchema, getHeldoutSet, getTool } from "./db";
 import { allowedImports, egressBlocked, type RunnerOutput, scoreOutputs } from "./gate";
 import { walletPayer, type Payer } from "./payer";
 import { runInSandbox } from "./round";
-import { createSandbox, destroySandbox, exec, upload } from "./sandbox/client";
+import { createSandboxReaping, destroySandbox, exec, upload } from "./sandbox/client";
 import { RUNNER_PY } from "./sandbox/runnerSource";
 import { auditKey, decideAudit, getAudit, previousTool, saveAudit, type AuditRow } from "./audit";
 import type { AuditBody } from "./evidence";
@@ -27,7 +27,7 @@ export interface AuditSandbox {
 
 export const realAuditSandbox: AuditSandbox = {
   async open(name) {
-    const sb = await createSandbox(name);
+    const sb = await createSandboxReaping(name);
     await upload(sb.id, "/workspace/runner.py", RUNNER_PY);
     return { id: sb.id };
   },

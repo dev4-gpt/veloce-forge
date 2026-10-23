@@ -49,6 +49,8 @@ export function verify(entries, { pubkey, head, margin = 2 } = {}) {
   const revokedTools = new Set();
   const audited = new Set();
   const seen = new Set();
+  const legacy = new Set(); // tools declared as pre-chain by epoch entries anywhere in the chain
+  for (const e of entries) if (e.body?.kind === "epoch") for (const id of e.body.legacyToolIds ?? []) legacy.add(id);
   const pub = pubkey ? createPublicKey({ key: Buffer.from(pubkey, "base64"), format: "der", type: "spki" }) : null;
 
   entries.forEach((e, i) => {
@@ -85,10 +87,13 @@ export function verify(entries, { pubkey, head, margin = 2 } = {}) {
         if (b.astOk !== true) w("the syntax-tree screen did not pass");
         if (b.settlement !== "settled" || b.costMicros === null) w("the round was not settled with a known cost");
       }
+      if (b.toolId && legacy.has(b.toolId)) problems.push(`${at}: tool ${b.toolId} is declared as pre-chain (legacy) but this chain has its round entry`);
       if (b.toolId && b.candidate) rounds.set(b.toolId, b);
     } else if (b.kind === "decision") {
       const r = rounds.get(b.toolId);
-      if (!r) problems.push(`${at}: decision on ${b.toolId} has no earlier round entry`);
+      if (!r && legacy.has(b.toolId)) {
+        // its round happened before the chain existed: nothing to cross-check, and an epoch entry in the chain says so
+      } else if (!r) problems.push(`${at}: decision on ${b.toolId} has no earlier round entry`);
       else {
         if (b.shaAtDecision !== r.candidate?.sha) problems.push(`${at}: decision hash differs from the code the round produced`);
         if (r.status !== "proposed") problems.push(`${at}: decision on a tool whose round was "${r.status}", not "proposed"`);
@@ -103,6 +108,8 @@ export function verify(entries, { pubkey, head, margin = 2 } = {}) {
         decided.add(b.toolId);
         if (b.decision === "approve") approvedTools.add(b.toolId);
       }
+    } else if (b.kind === "epoch") {
+      if (!Array.isArray(b.legacyToolIds) || b.legacyToolIds.length === 0 || b.legacyToolIds.some((x) => typeof x !== "string")) problems.push(`${at}: epoch entry without a valid legacy tool list`);
     } else if (b.kind === "audit") {
       const k = `${b.toolId}|${b.auditSetSha}`;
       if (!approvedTools.has(b.toolId)) problems.push(`${at}: audit of tool ${b.toolId} that was never approved`);

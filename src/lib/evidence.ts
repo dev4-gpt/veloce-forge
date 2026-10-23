@@ -111,7 +111,16 @@ export interface DecisionBody {
   at: string;
 }
 
-export type ReportBody = RoundBody | DecisionBody | AuditBody;
+/** Declares tools whose rounds happened BEFORE the chain existed, so a later decision on them cannot be cross-checked against a round
+ *  entry. It is appended to the chain like everything else (tamper-evident), may appear anywhere, and applies chain-wide. */
+export interface EpochBody {
+  kind: "epoch";
+  legacyToolIds: string[];
+  note: string;
+  at: string;
+}
+
+export type ReportBody = RoundBody | DecisionBody | AuditBody | EpochBody;
 
 export interface Entry {
   seq: number;
@@ -175,6 +184,8 @@ export function verifyChain(entries: Entry[], opts: VerifyOptions = {}): VerifyR
   const revokedTools = new Set<string>();
   const audited = new Set<string>();
   const roundIds = new Set<string>();
+  const legacy = new Set<string>(); // declared by epoch entries anywhere in the chain
+  for (const e of entries) if (e.body?.kind === "epoch") for (const id of e.body.legacyToolIds ?? []) legacy.add(id);
   let pub: KeyObject | null = null;
   if (opts.publicKeyB64) pub = createPublicKey({ key: Buffer.from(opts.publicKeyB64, "base64"), format: "der", type: "spki" });
 
@@ -217,10 +228,13 @@ export function verifyChain(entries: Entry[], opts: VerifyOptions = {}): VerifyR
         if (b.astOk !== true) w("the syntax-tree screen did not pass");
         if (b.settlement !== "settled" || b.costMicros === null) w("the round was not settled with a known cost");
       }
+      if (b.toolId && legacy.has(b.toolId)) problems.push(`${at}: tool ${b.toolId} is declared as pre-chain (legacy) but this chain has its round entry`);
       if (b.toolId && b.candidate) rounds.set(b.toolId, b);
     } else if (b.kind === "decision") {
       const r = rounds.get(b.toolId);
-      if (!r) problems.push(`${at}: decision on ${b.toolId} has no earlier round entry`);
+      if (!r && legacy.has(b.toolId)) {
+        // its round happened before the chain existed: nothing to cross-check, and that is stated by an epoch entry in the chain
+      } else if (!r) problems.push(`${at}: decision on ${b.toolId} has no earlier round entry`);
       else {
         if (b.shaAtDecision !== r.candidate?.sha) problems.push(`${at}: decision hash differs from the code the round produced`);
         if (r.status !== "proposed") problems.push(`${at}: decision on a tool whose round was "${r.status}", not "proposed"`);
@@ -237,6 +251,8 @@ export function verifyChain(entries: Entry[], opts: VerifyOptions = {}): VerifyR
         decided.add(b.toolId);
         if (b.decision === "approve") approvedTools.add(b.toolId);
       }
+    } else if (b.kind === "epoch") {
+      if (!Array.isArray(b.legacyToolIds) || b.legacyToolIds.length === 0 || b.legacyToolIds.some((x) => typeof x !== "string")) problems.push(`${at}: epoch entry without a valid legacy tool list`);
     } else if (b.kind === "audit") {
       const k = `${b.toolId}|${b.auditSetSha}`;
       if (!approvedTools.has(b.toolId)) problems.push(`${at}: audit of tool ${b.toolId} that was never approved`);
