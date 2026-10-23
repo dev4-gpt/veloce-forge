@@ -1,7 +1,11 @@
 // Provider-agnostic JSON completion with ordered fallback, so the agent never depends on a single free tier.
-// Order comes from LLM_PROVIDERS (default: gemini,openrouter,nvidia). A provider is used only if its key AND
-// model are configured. Model ids are never hardcoded here: pick them from each provider's dashboard.
+// Order comes from LLM_PROVIDERS (default below). A provider is used only if its key AND model are configured.
+// Model ids are never hardcoded here: pick them from each provider's dashboard.
+// A transient failure (HTTP 429/500/502/503/504, timeout, dropped connection) is retried on the SAME provider after a short pause
+// before the next provider is tried (LLM_RETRY_DELAYS_MS, default "1500,4000"; "0,0" in tests). Other errors fall through at once.
 // Free tiers change and may use prompts for training: use only with synthetic or non-sensitive data.
+// The OpenAI-compatible endpoints below come from free-LLM directories the author stars (nejib1/Free-LLM,
+// open-free-llm-api/awesome-freellm-apis). Those are third-party lists: limits and terms change, so re-check each provider's own page.
 // GitHub Models was removed: GitHub's docs report it retired on 2026-07-30 (found in research; re-verify before re-adding).
 
 export interface Completion {
@@ -23,10 +27,54 @@ interface OpenAICompat {
 const OPENAI_COMPAT: Record<string, OpenAICompat> = {
   openrouter: { name: "openrouter", baseUrl: "https://openrouter.ai/api/v1", keyEnv: "OPENROUTER_API_KEY", modelEnv: "OPENROUTER_MODEL" },
   nvidia: { name: "nvidia", baseUrl: "https://integrate.api.nvidia.com/v1", keyEnv: "NVIDIA_API_KEY", modelEnv: "NVIDIA_MODEL" },
+  groq: { name: "groq", baseUrl: "https://api.groq.com/openai/v1", keyEnv: "GROQ_API_KEY", modelEnv: "GROQ_MODEL" },
+  mistral: { name: "mistral", baseUrl: "https://api.mistral.ai/v1", keyEnv: "MISTRAL_API_KEY", modelEnv: "MISTRAL_MODEL" },
+  cerebras: { name: "cerebras", baseUrl: "https://api.cerebras.ai/v1", keyEnv: "CEREBRAS_API_KEY", modelEnv: "CEREBRAS_MODEL" },
+  sambanova: { name: "sambanova", baseUrl: "https://api.sambanova.ai/v1", keyEnv: "SAMBANOVA_API_KEY", modelEnv: "SAMBANOVA_MODEL" },
+  huggingface: { name: "huggingface", baseUrl: "https://router.huggingface.co/v1", keyEnv: "HUGGINGFACE_API_KEY", modelEnv: "HUGGINGFACE_MODEL" },
+  llm7: { name: "llm7", baseUrl: "https://api.llm7.io/v1", keyEnv: "LLM7_API_KEY", modelEnv: "LLM7_MODEL" },
 };
 
+export const DEFAULT_ORDER = "gemini,groq,openrouter,nvidia,mistral,cerebras,sambanova,huggingface,llm7";
+
+/** Error that remembers the HTTP status so the retry logic can tell a transient failure from a permanent one. */
+export class ProviderError extends Error {
+  constructor(message: string, readonly status: number | null) {
+    super(message);
+  }
+}
+
+const RETRYABLE = new Set([429, 500, 502, 503, 504]);
+
+function isTransient(e: unknown): boolean {
+  if (e instanceof ProviderError) return e.status === null || RETRYABLE.has(e.status);
+  const name = (e as { name?: string } | null)?.name;
+  return name === "TimeoutError" || name === "AbortError" || e instanceof TypeError; // fetch network failures are TypeErrors
+}
+
+export function retryDelays(env: NodeJS.ProcessEnv = process.env): number[] {
+  const raw = env.LLM_RETRY_DELAYS_MS ?? "1500,4000";
+  const d = raw.split(",").map((x) => x.trim()).filter((x) => x !== "").map(Number).filter((n) => Number.isFinite(n) && n >= 0);
+  return d.length ? d.slice(0, 4) : [];
+}
+
+const sleep = (ms: number) => (ms > 0 ? new Promise<void>((r) => setTimeout(r, ms)) : Promise.resolve());
+
+/** Run `fn`, retrying transient failures after each configured delay. A 429 is retried at most once (quota resets are slow). */
+export async function withRetry<T>(fn: () => Promise<T>, delays: number[] = retryDelays()): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await fn();
+    } catch (e) {
+      const limit = e instanceof ProviderError && e.status === 429 ? Math.min(1, delays.length) : delays.length;
+      if (attempt >= limit || !isTransient(e)) throw e;
+      await sleep(delays[attempt]);
+    }
+  }
+}
+
 export function configuredProviders(env: NodeJS.ProcessEnv = process.env): string[] {
-  const order = (env.LLM_PROVIDERS || "gemini,openrouter,nvidia").split(",").map((s) => s.trim()).filter(Boolean);
+  const order = (env.LLM_PROVIDERS || DEFAULT_ORDER).split(",").map((s) => s.trim()).filter(Boolean);
   return order.filter((p) => {
     if (p === "gemini") return Boolean(env.GEMINI_API_KEY);
     const c = OPENAI_COMPAT[p];
@@ -56,7 +104,7 @@ async function viaGemini(system: string, user: string): Promise<Completion> {
     signal: AbortSignal.timeout(90_000),
   });
   const body: any = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(`gemini HTTP ${res.status}: ${String(body?.error?.message ?? "").slice(0, 120)}`);
+  if (!res.ok) throw new ProviderError(`gemini HTTP ${res.status}: ${String(body?.error?.message ?? "").slice(0, 120)}`, res.status);
   const text = body?.candidates?.[0]?.content?.parts?.map((p: any) => p.text ?? "").join("") ?? "";
   const u = body?.usageMetadata;
   return {
@@ -71,22 +119,26 @@ async function viaGemini(system: string, user: string): Promise<Completion> {
 async function viaOpenAICompat(c: OpenAICompat, system: string, user: string): Promise<Completion> {
   const key = process.env[c.keyEnv]!;
   const model = process.env[c.modelEnv]!;
-  const res = await fetch(`${c.baseUrl}/chat/completions`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json", ...c.extraHeaders },
-    body: JSON.stringify({
-      model,
-      temperature: 0.2,
-      response_format: { type: "json_object" },
-      messages: [
-        { role: "system", content: system + ' Respond with a single JSON object: {"rationale": string, "code": string}.' },
-        { role: "user", content: user },
-      ],
-    }),
-    signal: AbortSignal.timeout(90_000),
-  });
+  const call = (jsonMode: boolean) =>
+    fetch(`${c.baseUrl}/chat/completions`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json", ...c.extraHeaders },
+      body: JSON.stringify({
+        model,
+        temperature: 0.2,
+        ...(jsonMode ? { response_format: { type: "json_object" } } : {}),
+        messages: [
+          { role: "system", content: system + ' Respond with a single JSON object: {"rationale": string, "code": string}.' },
+          { role: "user", content: user },
+        ],
+      }),
+      signal: AbortSignal.timeout(90_000),
+    });
+  let res = await call(true);
+  // Some providers or models reject JSON mode; the prompt already demands JSON and extractJson copes with fences, so retry once without it.
+  if (res.status === 400 || res.status === 422) res = await call(false);
   const body: any = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(`${c.name} HTTP ${res.status}: ${String(body?.error?.message ?? "").slice(0, 120)}`);
+  if (!res.ok) throw new ProviderError(`${c.name} HTTP ${res.status}: ${String(body?.error?.message ?? "").slice(0, 120)}`, res.status);
   const text = body?.choices?.[0]?.message?.content ?? "";
   const u = body?.usage;
   return {
@@ -107,11 +159,11 @@ function extractJson(text: string): string {
 /** Try each configured provider in order until one returns parseable JSON with a `code` field. */
 export async function completeJSON(system: string, user: string): Promise<{ completion: Completion; json: { rationale?: string; code?: string }; tried: string[] }> {
   const providers = configuredProviders();
-  if (providers.length === 0) throw new Error("no LLM provider configured (set GEMINI_API_KEY or an OpenRouter/NVIDIA/GitHub key + model)");
+  if (providers.length === 0) throw new Error(`no LLM provider configured (set GEMINI_API_KEY, or a key + model for one of: ${Object.keys(OPENAI_COMPAT).join(", ")})`);
   const errors: string[] = [];
   for (const p of providers) {
     try {
-      const completion = p === "gemini" ? await viaGemini(system, user) : await viaOpenAICompat(OPENAI_COMPAT[p], system, user);
+      const completion = await withRetry(() => (p === "gemini" ? viaGemini(system, user) : viaOpenAICompat(OPENAI_COMPAT[p], system, user)));
       const json = JSON.parse(extractJson(completion.text));
       if (!json.code) throw new Error("no code in response");
       return { completion, json, tried: [...errors.map((e) => e.split(":")[0]), p] };
