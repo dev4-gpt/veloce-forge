@@ -56,6 +56,13 @@ function isTransient(e: unknown): boolean {
   return e instanceof TypeError; // fetch network failures are TypeErrors and fail fast
 }
 
+/** One provider call may use at most this long (LLM_CALL_TIMEOUT_MS, default 45 s), so a provider that hangs cannot starve the fallbacks:
+ *  with the 100 s total budget, a hung first provider still leaves the second one a full turn. */
+export const callCapMs = (env: NodeJS.ProcessEnv = process.env) => {
+  const n = Number(env.LLM_CALL_TIMEOUT_MS ?? 45_000);
+  return Number.isFinite(n) && n > 0 ? n : 45_000;
+};
+
 export const RETRY_MIN_REMAINING_MS = 15_000; // do not start a retry or a new provider with less than this left in the budget
 export const totalBudgetMs = (env: NodeJS.ProcessEnv = process.env) => {
   const n = Number(env.LLM_TOTAL_BUDGET_MS ?? 100_000);
@@ -173,8 +180,9 @@ export async function completeJSON(system: string, user: string): Promise<{ comp
   const errors: string[] = [];
   const deadline = Date.now() + totalBudgetMs();
   const remaining = () => deadline - Date.now();
-  // each call may use at most what is left of the budget (never more than 90 s, never less than 1 s)
-  const callTimeout = () => Math.max(1_000, Math.min(90_000, remaining()));
+  // each call may use at most the per-call cap and at most what is left of the budget (never less than 1 s)
+  const cap = callCapMs();
+  const callTimeout = () => Math.max(1_000, Math.min(cap, remaining()));
   for (const p of providers) {
     if (errors.length > 0 && remaining() < RETRY_MIN_REMAINING_MS) {
       errors.push(`${p}: skipped (time budget used up)`);

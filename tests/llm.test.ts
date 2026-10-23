@@ -1,10 +1,10 @@
 // Run: npx tsx --test tests/llm.test.ts
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, test } from "node:test";
-import { completeJSON, configuredProviders, DEFAULT_ORDER, ProviderError, retryDelays, totalBudgetMs, withRetry } from "../src/lib/llm";
+import { callCapMs, completeJSON, configuredProviders, DEFAULT_ORDER, ProviderError, retryDelays, totalBudgetMs, withRetry } from "../src/lib/llm";
 
 const realFetch = globalThis.fetch;
-const ENV_KEYS = ["LLM_PROVIDERS", "LLM_RETRY_DELAYS_MS", "LLM_TOTAL_BUDGET_MS", "GEMINI_API_KEY", "OPENROUTER_API_KEY", "OPENROUTER_MODEL", "NVIDIA_API_KEY", "NVIDIA_MODEL",
+const ENV_KEYS = ["LLM_PROVIDERS", "LLM_RETRY_DELAYS_MS", "LLM_TOTAL_BUDGET_MS", "LLM_CALL_TIMEOUT_MS", "GEMINI_API_KEY", "OPENROUTER_API_KEY", "OPENROUTER_MODEL", "NVIDIA_API_KEY", "NVIDIA_MODEL",
   "GROQ_API_KEY", "GROQ_MODEL", "MISTRAL_API_KEY", "MISTRAL_MODEL", "CEREBRAS_API_KEY", "CEREBRAS_MODEL", "SAMBANOVA_API_KEY", "SAMBANOVA_MODEL",
   "HUGGINGFACE_API_KEY", "HUGGINGFACE_MODEL", "LLM7_API_KEY", "LLM7_MODEL"];
 beforeEach(() => {
@@ -249,4 +249,25 @@ test("an error named TimeoutError or AbortError is never retried, even if the ru
     await assert.rejects(() => withRetry(async () => { calls++; throw Object.assign(new TypeError("t"), { name }); }, [0, 0, 0]));
     assert.equal(calls, 1, name);
   }
+});
+
+test("a hung first provider cannot starve the fallback: it is cut off at the per-call cap and the next provider gets a full turn", async () => {
+  process.env.GEMINI_API_KEY = "g";
+  process.env.GROQ_API_KEY = "k";
+  process.env.GROQ_MODEL = "m";
+  process.env.LLM_CALL_TIMEOUT_MS = "1000";
+  process.env.LLM_TOTAL_BUDGET_MS = "60000";
+  const calls = counter((u, _n, init) => (u.includes("generativelanguage") ? (hang(init) as unknown as Response) : okChat()));
+  const t0 = Date.now();
+  const r = await completeJSON("s", "u");
+  assert.equal(r.completion.provider, "groq");
+  assert.equal(calls.filter((c) => c.url.includes("generativelanguage")).length, 1); // hang is not retried
+  assert.ok(Date.now() - t0 < 5000);
+});
+
+test("per-call cap parsing: default 45 s, junk and non-positive values fall back", () => {
+  assert.equal(callCapMs({} as NodeJS.ProcessEnv), 45_000);
+  assert.equal(callCapMs({ LLM_CALL_TIMEOUT_MS: "20000" } as unknown as NodeJS.ProcessEnv), 20_000);
+  assert.equal(callCapMs({ LLM_CALL_TIMEOUT_MS: "x" } as unknown as NodeJS.ProcessEnv), 45_000);
+  assert.equal(callCapMs({ LLM_CALL_TIMEOUT_MS: "-1" } as unknown as NodeJS.ProcessEnv), 45_000);
 });
