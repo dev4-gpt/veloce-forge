@@ -3,6 +3,9 @@
 // Model ids are never hardcoded here: pick them from each provider's dashboard.
 // A transient failure (HTTP 429/500/502/503/504, timeout, dropped connection) is retried on the SAME provider after a short pause
 // before the next provider is tried (LLM_RETRY_DELAYS_MS, default "1500,4000"; "0,0" in tests). Other errors fall through at once.
+// A TIMEOUT is never retried (it already spent its whole budget), and one completeJSON call has a total time budget
+// (LLM_TOTAL_BUDGET_MS, default 100000) across all providers and retries, so a round (two proposals) always finishes inside the
+// 300 s function limit. A round killed by that limit leaves its money held and no report, which is what this prevents.
 // Free tiers change and may use prompts for training: use only with synthetic or non-sensitive data.
 // The OpenAI-compatible endpoints below come from free-LLM directories the author stars (nejib1/Free-LLM,
 // open-free-llm-api/awesome-freellm-apis). Those are third-party lists: limits and terms change, so re-check each provider's own page.
@@ -49,8 +52,15 @@ const RETRYABLE = new Set([429, 500, 502, 503, 504]);
 function isTransient(e: unknown): boolean {
   if (e instanceof ProviderError) return e.status === null || RETRYABLE.has(e.status);
   const name = (e as { name?: string } | null)?.name;
-  return name === "TimeoutError" || name === "AbortError" || e instanceof TypeError; // fetch network failures are TypeErrors
+  if (name === "TimeoutError" || name === "AbortError") return false; // already spent its time: retrying would multiply the wait
+  return e instanceof TypeError; // fetch network failures are TypeErrors and fail fast
 }
+
+export const RETRY_MIN_REMAINING_MS = 15_000; // do not start a retry or a new provider with less than this left in the budget
+export const totalBudgetMs = (env: NodeJS.ProcessEnv = process.env) => {
+  const n = Number(env.LLM_TOTAL_BUDGET_MS ?? 100_000);
+  return Number.isFinite(n) && n > 0 ? n : 100_000;
+};
 
 export function retryDelays(env: NodeJS.ProcessEnv = process.env): number[] {
   const raw = env.LLM_RETRY_DELAYS_MS ?? "1500,4000";
@@ -61,13 +71,13 @@ export function retryDelays(env: NodeJS.ProcessEnv = process.env): number[] {
 const sleep = (ms: number) => (ms > 0 ? new Promise<void>((r) => setTimeout(r, ms)) : Promise.resolve());
 
 /** Run `fn`, retrying transient failures after each configured delay. A 429 is retried at most once (quota resets are slow). */
-export async function withRetry<T>(fn: () => Promise<T>, delays: number[] = retryDelays()): Promise<T> {
+export async function withRetry<T>(fn: () => Promise<T>, delays: number[] = retryDelays(), canRetry: () => boolean = () => true): Promise<T> {
   for (let attempt = 0; ; attempt++) {
     try {
       return await fn();
     } catch (e) {
       const limit = e instanceof ProviderError && e.status === 429 ? Math.min(1, delays.length) : delays.length;
-      if (attempt >= limit || !isTransient(e)) throw e;
+      if (attempt >= limit || !isTransient(e) || !canRetry()) throw e;
       await sleep(delays[attempt]);
     }
   }
@@ -82,7 +92,7 @@ export function configuredProviders(env: NodeJS.ProcessEnv = process.env): strin
   });
 }
 
-async function viaGemini(system: string, user: string): Promise<Completion> {
+async function viaGemini(system: string, user: string, timeoutMs = 90_000): Promise<Completion> {
   const key = process.env.GEMINI_API_KEY!;
   const model = process.env.GEMINI_MODEL || "gemini-3.8-flash";
   const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
@@ -101,7 +111,7 @@ async function viaGemini(system: string, user: string): Promise<Completion> {
         },
       },
     }),
-    signal: AbortSignal.timeout(90_000),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   const body: any = await res.json().catch(() => ({}));
   if (!res.ok) throw new ProviderError(`gemini HTTP ${res.status}: ${String(body?.error?.message ?? "").slice(0, 120)}`, res.status);
@@ -116,7 +126,7 @@ async function viaGemini(system: string, user: string): Promise<Completion> {
   };
 }
 
-async function viaOpenAICompat(c: OpenAICompat, system: string, user: string): Promise<Completion> {
+async function viaOpenAICompat(c: OpenAICompat, system: string, user: string, timeoutMs = 90_000): Promise<Completion> {
   const key = process.env[c.keyEnv]!;
   const model = process.env[c.modelEnv]!;
   const call = (jsonMode: boolean) =>
@@ -132,7 +142,7 @@ async function viaOpenAICompat(c: OpenAICompat, system: string, user: string): P
           { role: "user", content: user },
         ],
       }),
-      signal: AbortSignal.timeout(90_000),
+      signal: AbortSignal.timeout(timeoutMs),
     });
   let res = await call(true);
   // Some providers or models reject JSON mode; the prompt already demands JSON and extractJson copes with fences, so retry once without it.
@@ -161,9 +171,21 @@ export async function completeJSON(system: string, user: string): Promise<{ comp
   const providers = configuredProviders();
   if (providers.length === 0) throw new Error(`no LLM provider configured (set GEMINI_API_KEY, or a key + model for one of: ${Object.keys(OPENAI_COMPAT).join(", ")})`);
   const errors: string[] = [];
+  const deadline = Date.now() + totalBudgetMs();
+  const remaining = () => deadline - Date.now();
+  // each call may use at most what is left of the budget (never more than 90 s, never less than 1 s)
+  const callTimeout = () => Math.max(1_000, Math.min(90_000, remaining()));
   for (const p of providers) {
+    if (errors.length > 0 && remaining() < RETRY_MIN_REMAINING_MS) {
+      errors.push(`${p}: skipped (time budget used up)`);
+      break;
+    }
     try {
-      const completion = await withRetry(() => (p === "gemini" ? viaGemini(system, user) : viaOpenAICompat(OPENAI_COMPAT[p], system, user)));
+      const completion = await withRetry(
+        () => (p === "gemini" ? viaGemini(system, user, callTimeout()) : viaOpenAICompat(OPENAI_COMPAT[p], system, user, callTimeout())),
+        retryDelays(),
+        () => remaining() >= RETRY_MIN_REMAINING_MS,
+      );
       const json = JSON.parse(extractJson(completion.text));
       if (!json.code) throw new Error("no code in response");
       return { completion, json, tried: [...errors.map((e) => e.split(":")[0]), p] };

@@ -1,10 +1,10 @@
 // Run: npx tsx --test tests/llm.test.ts
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, test } from "node:test";
-import { completeJSON, configuredProviders, DEFAULT_ORDER, ProviderError, retryDelays, withRetry } from "../src/lib/llm";
+import { completeJSON, configuredProviders, DEFAULT_ORDER, ProviderError, retryDelays, totalBudgetMs, withRetry } from "../src/lib/llm";
 
 const realFetch = globalThis.fetch;
-const ENV_KEYS = ["LLM_PROVIDERS", "LLM_RETRY_DELAYS_MS", "GEMINI_API_KEY", "OPENROUTER_API_KEY", "OPENROUTER_MODEL", "NVIDIA_API_KEY", "NVIDIA_MODEL",
+const ENV_KEYS = ["LLM_PROVIDERS", "LLM_RETRY_DELAYS_MS", "LLM_TOTAL_BUDGET_MS", "GEMINI_API_KEY", "OPENROUTER_API_KEY", "OPENROUTER_MODEL", "NVIDIA_API_KEY", "NVIDIA_MODEL",
   "GROQ_API_KEY", "GROQ_MODEL", "MISTRAL_API_KEY", "MISTRAL_MODEL", "CEREBRAS_API_KEY", "CEREBRAS_MODEL", "SAMBANOVA_API_KEY", "SAMBANOVA_MODEL",
   "HUGGINGFACE_API_KEY", "HUGGINGFACE_MODEL", "LLM7_API_KEY", "LLM7_MODEL"];
 beforeEach(() => {
@@ -194,4 +194,59 @@ test("an unknown provider name in LLM_PROVIDERS is ignored rather than crashing"
 
 test("the error when nothing is configured names the supported providers", async () => {
   await assert.rejects(() => completeJSON("s", "u"), /groq.*mistral.*cerebras/);
+});
+
+// ---------- time budget: a round must finish inside the 300 s function limit ----------
+const hang = (init?: RequestInit) =>
+  new Promise<Response>((_res, rej) => init?.signal?.addEventListener("abort", () => rej(init.signal!.reason)));
+
+test("a provider that hangs until its timeout is NOT retried (a retry would multiply the wait)", async () => {
+  process.env.GEMINI_API_KEY = "g";
+  process.env.LLM_TOTAL_BUDGET_MS = "1200";
+  const calls = counter((_u, _n, init) => hang(init) as unknown as Response);
+  const t0 = Date.now();
+  await assert.rejects(() => completeJSON("s", "u"), /all providers failed/);
+  assert.equal(calls.length, 1);
+  assert.ok(Date.now() - t0 < 4000, "must give up after about one call timeout, not several");
+});
+
+test("each call's timeout is capped by what is left of the total budget", async () => {
+  process.env.GEMINI_API_KEY = "g";
+  process.env.LLM_TOTAL_BUDGET_MS = "1500";
+  const t0 = Date.now();
+  counter((_u, _n, init) => hang(init) as unknown as Response);
+  await assert.rejects(() => completeJSON("s", "u"));
+  const took = Date.now() - t0;
+  assert.ok(took >= 1000 && took < 3000, `took ${took} ms; the 90 s default must not apply`);
+});
+
+test("with the budget nearly used up, no further provider is started and no retry is made", async () => {
+  process.env.GEMINI_API_KEY = "g";
+  process.env.GROQ_API_KEY = "k";
+  process.env.GROQ_MODEL = "m";
+  process.env.LLM_TOTAL_BUDGET_MS = "14000"; // below the 15 s needed to start anything else
+  const calls = counter((u) => (u.includes("generativelanguage") ? new Response("{}", { status: 503 }) : okChat()));
+  await assert.rejects(() => completeJSON("s", "u"), /time budget used up/);
+  assert.equal(calls.length, 1); // one Gemini call: no retry, and Groq never started
+});
+
+test("budget parsing: default 100 s, junk and non-positive values fall back to the default", () => {
+  assert.equal(totalBudgetMs({} as NodeJS.ProcessEnv), 100_000);
+  assert.equal(totalBudgetMs({ LLM_TOTAL_BUDGET_MS: "30000" } as unknown as NodeJS.ProcessEnv), 30_000);
+  assert.equal(totalBudgetMs({ LLM_TOTAL_BUDGET_MS: "abc" } as unknown as NodeJS.ProcessEnv), 100_000);
+  assert.equal(totalBudgetMs({ LLM_TOTAL_BUDGET_MS: "0" } as unknown as NodeJS.ProcessEnv), 100_000);
+});
+
+test("withRetry stops retrying when canRetry says the budget is gone", async () => {
+  let calls = 0;
+  await assert.rejects(() => withRetry(async () => { calls++; throw new ProviderError("x HTTP 503", 503); }, [0, 0, 0], () => calls < 2), /503/);
+  assert.equal(calls, 2);
+});
+
+test("an error named TimeoutError or AbortError is never retried, even if the runtime wraps it as a TypeError", async () => {
+  for (const name of ["TimeoutError", "AbortError"]) {
+    let calls = 0;
+    await assert.rejects(() => withRetry(async () => { calls++; throw Object.assign(new TypeError("t"), { name }); }, [0, 0, 0]));
+    assert.equal(calls, 1, name);
+  }
 });
