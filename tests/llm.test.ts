@@ -1,10 +1,10 @@
 // Run: npx tsx --test tests/llm.test.ts
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, test } from "node:test";
-import { callCapMs, completeJSON, configuredProviders, DEFAULT_ORDER, ProviderError, retryDelays, totalBudgetMs, withRetry } from "../src/lib/llm";
+import { callCapMs, completeJSON, maxOutputTokens, configuredProviders, DEFAULT_ORDER, ProviderError, retryDelays, totalBudgetMs, withRetry } from "../src/lib/llm";
 
 const realFetch = globalThis.fetch;
-const ENV_KEYS = ["LLM_PROVIDERS", "LLM_RETRY_DELAYS_MS", "LLM_TOTAL_BUDGET_MS", "LLM_CALL_TIMEOUT_MS", "GEMINI_API_KEY", "OPENROUTER_API_KEY", "OPENROUTER_MODEL", "NVIDIA_API_KEY", "NVIDIA_MODEL",
+const ENV_KEYS = ["LLM_PROVIDERS", "LLM_RETRY_DELAYS_MS", "LLM_TOTAL_BUDGET_MS", "LLM_CALL_TIMEOUT_MS", "LLM_MAX_OUTPUT_TOKENS", "GEMINI_API_KEY", "OPENROUTER_API_KEY", "OPENROUTER_MODEL", "NVIDIA_API_KEY", "NVIDIA_MODEL",
   "GROQ_API_KEY", "GROQ_MODEL", "MISTRAL_API_KEY", "MISTRAL_MODEL", "CEREBRAS_API_KEY", "CEREBRAS_MODEL", "SAMBANOVA_API_KEY", "SAMBANOVA_MODEL",
   "HUGGINGFACE_API_KEY", "HUGGINGFACE_MODEL", "LLM7_API_KEY", "LLM7_MODEL"];
 beforeEach(() => {
@@ -270,4 +270,60 @@ test("per-call cap parsing: default 45 s, junk and non-positive values fall back
   assert.equal(callCapMs({ LLM_CALL_TIMEOUT_MS: "20000" } as unknown as NodeJS.ProcessEnv), 20_000);
   assert.equal(callCapMs({ LLM_CALL_TIMEOUT_MS: "x" } as unknown as NodeJS.ProcessEnv), 45_000);
   assert.equal(callCapMs({ LLM_CALL_TIMEOUT_MS: "-1" } as unknown as NodeJS.ProcessEnv), 45_000);
+});
+
+// ---------- truncated / malformed replies (seen live: a Groq reply cut off inside the code string) ----------
+const chat = (text: string) => new Response(JSON.stringify({ choices: [{ message: { content: text } }] }), { status: 200 });
+const GOOD = '{"rationale":"r","code":"def normalize(raw):\\n    return raw"}';
+
+test("a truncated reply (unparseable JSON) is retried on the same provider, then succeeds", async () => {
+  process.env.GROQ_API_KEY = "k";
+  process.env.GROQ_MODEL = "m";
+  process.env.LLM_PROVIDERS = "groq";
+  const calls = counter((_u, n) => (n === 1 ? chat('{"rationale":"r","code":"def normalize(raw):\\n    return ra') : chat(GOOD)));
+  const r = await completeJSON("s", "u");
+  assert.equal(r.completion.provider, "groq");
+  assert.equal(calls.length, 2);
+});
+
+test("a reply that stays unparseable falls through to the next provider after the retries", async () => {
+  process.env.GROQ_API_KEY = "k";
+  process.env.GROQ_MODEL = "m";
+  process.env.MISTRAL_API_KEY = "k";
+  process.env.MISTRAL_MODEL = "m";
+  process.env.LLM_PROVIDERS = "groq,mistral";
+  const calls = counter((u) => (u.includes("groq") ? chat("{not json") : chat(GOOD)));
+  const r = await completeJSON("s", "u");
+  assert.equal(r.completion.provider, "mistral");
+  assert.equal(calls.filter((c) => c.url.includes("groq")).length, 3); // first try + 2 retries
+});
+
+test("a reply without code is also retried, and the final error says why", async () => {
+  process.env.GROQ_API_KEY = "k";
+  process.env.GROQ_MODEL = "m";
+  process.env.LLM_PROVIDERS = "groq";
+  const calls = counter(() => chat('{"rationale":"only a rationale"}'));
+  await assert.rejects(() => completeJSON("s", "u"), /groq reply had no code/);
+  assert.equal(calls.length, 3);
+});
+
+test("every provider is asked for a large output budget so reasoning models do not truncate the code", async () => {
+  process.env.GEMINI_API_KEY = "g";
+  process.env.GROQ_API_KEY = "k";
+  process.env.GROQ_MODEL = "m";
+  const calls = counter((u) => (u.includes("generativelanguage") ? new Response("{}", { status: 401 }) : chat(GOOD)));
+  await completeJSON("s", "u");
+  assert.equal(JSON.parse(calls.find((c) => c.url.includes("generativelanguage"))!.body).generationConfig.maxOutputTokens, 8192);
+  assert.equal(JSON.parse(calls.find((c) => c.url.includes("groq"))!.body).max_tokens, 8192);
+  process.env.LLM_MAX_OUTPUT_TOKENS = "4000";
+  const c2 = counter(() => chat(GOOD));
+  process.env.LLM_PROVIDERS = "groq";
+  await completeJSON("s", "u");
+  assert.equal(JSON.parse(c2[0].body).max_tokens, 4000);
+});
+
+test("output budget parsing: default 8192; junk, tiny and fractional values fall back", () => {
+  assert.equal(maxOutputTokens({} as NodeJS.ProcessEnv), 8192);
+  assert.equal(maxOutputTokens({ LLM_MAX_OUTPUT_TOKENS: "16000" } as unknown as NodeJS.ProcessEnv), 16000);
+  for (const bad of ["abc", "10", "-5", "1000.5", ""]) assert.equal(maxOutputTokens({ LLM_MAX_OUTPUT_TOKENS: bad } as unknown as NodeJS.ProcessEnv), 8192, bad);
 });
