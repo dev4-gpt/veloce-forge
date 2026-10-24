@@ -369,3 +369,27 @@ test("revoke is refused when the version it should restore is not available, and
   assert.equal(await applyRevoke(v2.id, v2.sha, v1.id, "u-rev"), false);
   assert.equal((await getTool(v2.id))!.status, "active");
 });
+
+// ---------- retrying an audit after a failed attempt (found live: HTTP 500 on the unique ledger key) ----------
+test("an audit that could not run can be retried, and the retry is paid for separately", async () => {
+  await credit("k", 1_000_000, "t");
+  await seedSets();
+  const tool = await promote(GOOD, 6);
+  const first = await run(tool.id, localSandbox({ failRun: true }).sb); // e.g. the sandbox quota was used up
+  assert.equal(first.status, "skipped");
+  assert.equal((await getWallet()).held, AUDIT_CAP_MICROS); // the failed attempt's money is held, as designed
+  const second = await run(tool.id, localSandbox().sb); // used to throw: duplicate key value violates "ledger_idem_key_key"
+  assert.equal(second.status, "passed");
+  const w = await getWallet();
+  assert.equal(w.held, AUDIT_CAP_MICROS); // still only the first attempt's hold; the retry settled
+  const reserves = (await sql()`select count(*) as n from ledger where kind = 'reserve' and round_id like ${"audit-" + tool.id + "%"}`) as { n: number }[];
+  assert.equal(Number(reserves[0].n), 2);
+});
+
+test("many failed attempts in a row never collide with each other", async () => {
+  await credit("k", 1_000_000, "t");
+  await seedSets();
+  const tool = await promote(GOOD, 6);
+  for (let i = 0; i < 3; i++) assert.equal((await run(tool.id, localSandbox({ failRun: true }).sb)).status, "skipped");
+  assert.equal((await getWallet()).held, 3 * AUDIT_CAP_MICROS);
+});

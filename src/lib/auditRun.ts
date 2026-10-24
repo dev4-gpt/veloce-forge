@@ -67,7 +67,9 @@ export async function runAuditForTool(toolId: string, deps: AuditDeps = {}): Pro
   const prev = await previousTool(tool);
   if (!prev) return skipped("there is no earlier version to compare with");
 
-  const payer = deps.payer ? deps.payer(tool.id) : walletPayer(`audit-${tool.id}`, AUDIT_CAP_MICROS);
+  // Each ATTEMPT gets its own payment id. A fixed id made a retry crash on the ledger's unique key once an earlier attempt had reserved
+  // money and then been blocked (found live: the first command audit hit the sandbox quota, and every retry returned HTTP 500).
+  const payer = deps.payer ? deps.payer(tool.id) : walletPayer(`audit-${tool.id}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`, AUDIT_CAP_MICROS);
   const authz = await payer.authorize();
   if (!authz.ok) return skipped(`audit not paid for (${authz.reason}); the tool stays unaudited`);
 
