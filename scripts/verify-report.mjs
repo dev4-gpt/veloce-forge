@@ -49,6 +49,7 @@ export function verify(entries, { pubkey, head, margin = 2, signedFrom } = {}) {
   const decided = new Set();
   const approvedTools = new Set();
   const revokedTools = new Set();
+  const seenDecisions = new Set();
   const audited = new Set();
   const seen = new Set();
   const legacy = new Set(); // tools declared as pre-chain by epoch entries anywhere in the chain
@@ -103,7 +104,12 @@ export function verify(entries, { pubkey, head, margin = 2, signedFrom } = {}) {
         if (r.status !== "proposed") problems.push(`${at}: decision on a tool whose round was "${r.status}", not "proposed"`);
         if (b.decision !== "revoke" && r.startedBy && r.startedBy === b.reviewerId && b.reviewerId !== "shared-passcode") problems.push(`${at}: separation of duties violated (${b.reviewerId} started the round and reviewed it)`);
       }
-      if (b.decision === "revoke") {
+      // An EXACT repeat (same tool, decision, code hash and reviewer) is a double submit, not a second decision: tolerated. Anything
+      // different, such as approve then reject or two different reviewers, is still flagged.
+      const dk = `${b.toolId}|${b.decision}|${b.shaAtDecision}|${b.reviewerId}`;
+      if (seenDecisions.has(dk)) {
+        // duplicate submission of the same decision: nothing new to count
+      } else if (b.decision === "revoke") {
         if (!approvedTools.has(b.toolId)) problems.push(`${at}: revoke of tool ${b.toolId} that was never approved`);
         if (revokedTools.has(b.toolId)) problems.push(`${at}: tool ${b.toolId} was revoked more than once`);
         revokedTools.add(b.toolId);
@@ -112,6 +118,7 @@ export function verify(entries, { pubkey, head, margin = 2, signedFrom } = {}) {
         decided.add(b.toolId);
         if (b.decision === "approve") approvedTools.add(b.toolId);
       }
+      seenDecisions.add(dk);
     } else if (b.kind === "epoch") {
       if (!Array.isArray(b.legacyToolIds) || b.legacyToolIds.length === 0 || b.legacyToolIds.some((x) => typeof x !== "string")) problems.push(`${at}: epoch entry without a valid legacy tool list`);
     } else if (b.kind === "audit") {

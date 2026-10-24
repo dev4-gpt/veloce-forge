@@ -261,15 +261,28 @@ export async function review(toolId: string, decision: "approve" | "reject", sha
     const cur = (await sql()`select sha from heldout_sets where family = ${t.family}`) as { sha: string }[];
     if (isStaleProposal(t, cur[0]?.sha ?? null)) return { ok: false, error: STALE_ERROR };
   }
+  const done = await applyReview(toolId, decision, actual, reviewerId);
+  return done ? { ok: true } : { ok: false, error: "tool changed state during review" };
+}
+
+/** The single statement behind approve/reject. Exported so a test can call it twice, skipping the pre-checks that would hide a race.
+ *  Returns true only for the call that really changed the tool's state. */
+export async function applyReview(toolId: string, decision: "approve" | "reject", actual: string, reviewerId: string | null): Promise<boolean> {
+  const approve = decision === "approve";
+  // The UPDATE is the gate: only the request that really flips the tool out of 'proposed' returns a row, and only that row can record an
+  // approval or supersede the old tool. Two overlapping requests (a double click, a retry) cannot both pass: the second waits for the
+  // row lock, re-checks status = 'proposed', finds it changed and returns nothing. (Found live: a double submit wrote two approvals.)
   // The held-out check is repeated inside the statement so a set re-seeded between the check above and here cannot slip through.
   const r = (await sql()`
-    with cand as (select id, family from tools where id = ${toolId} and status = 'proposed' and sha = ${actual}
-      and (not ${approve}::boolean or heldout_sha = (select sha from heldout_sets where heldout_sets.family = tools.family))),
-    appr as (insert into approvals(tool_id, decision, sha_at_decision, reviewer_id) select id, ${decision}::text, ${actual}::text, ${reviewerId}::text from cand returning 1),
-    sup as (update tools set status = 'superseded' where ${approve}::boolean and status = 'active' and family = (select family from cand) and exists (select 1 from cand) returning 1),
-    act as (update tools set status = case when ${approve}::boolean then 'active' else 'rejected' end where id in (select id from cand) returning 1)
-    select (select count(*) from cand) as n`) as any[];
-  return Number(r[0]?.n ?? 0) > 0 ? { ok: true } : { ok: false, error: "tool changed state during review" };
+    with act as (
+      update tools set status = case when ${approve}::boolean then 'active' else 'rejected' end
+      where id = ${toolId} and status = 'proposed' and sha = ${actual}
+        and (not ${approve}::boolean or heldout_sha = (select sha from heldout_sets where heldout_sets.family = tools.family))
+      returning id, family),
+    appr as (insert into approvals(tool_id, decision, sha_at_decision, reviewer_id) select id, ${decision}::text, ${actual}::text, ${reviewerId}::text from act returning 1),
+    sup as (update tools set status = 'superseded' where ${approve}::boolean and status = 'active' and family = (select family from act) and exists (select 1 from act) returning 1)
+    select (select count(*) from act) as n`) as any[];
+  return Number(r[0]?.n ?? 0) > 0;
 }
 
 /** Atomically claim the single "running" slot. Stale rows (older than 3 minutes) are expired first so a crashed

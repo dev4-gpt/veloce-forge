@@ -103,12 +103,23 @@ export async function revokeTool(toolId: string, shaReviewed: string, reviewerId
   if (t.sha !== shaReviewed) return { ok: false, error: "hash mismatch: the code changed after review" };
   const prev = await previousTool(t);
   if (!prev) return { ok: false, error: "there is no earlier version to restore; refusing to leave the family without an active tool" };
+  const done = await applyRevoke(toolId, shaReviewed, prev.id, reviewerId);
+  return done ? { ok: true, restored: prev.id } : { ok: false, error: "tool changed state during revoke" };
+}
+
+/** The single statement behind revoke (see applyReview in db.ts). Exported for tests. True only for the call that really revoked. */
+export async function applyRevoke(toolId: string, shaReviewed: string, prevId: string, reviewerId: string | null): Promise<boolean> {
+  // The UPDATE is the gate (see review() in db.ts): only the request that really flips the tool out of 'active' records the revoke, so a
+  // double submit cannot write two, and the tool is never revoked unless the version it replaced can be restored in the same statement.
   const r = (await sql()`
-    with cur as (select id, family from tools where id = ${toolId} and status = 'active' and sha = ${shaReviewed}),
-    prv as (select id from tools where id = ${prev.id} and status = 'superseded' and exists (select 1 from cur)),
-    appr as (insert into approvals(tool_id, decision, sha_at_decision, reviewer_id) select id, 'revoke'::text, ${shaReviewed}::text, ${reviewerId}::text from cur returning 1),
-    rv as (update tools set status = 'revoked' where id in (select id from cur) and exists (select 1 from prv) returning 1),
-    rs as (update tools set status = 'active' where id in (select id from prv) and exists (select 1 from cur) returning 1)
-    select (select count(*) from cur) as n, (select count(*) from prv) as p`) as { n: number; p: number }[];
-  return Number(r[0]?.n ?? 0) > 0 && Number(r[0]?.p ?? 0) > 0 ? { ok: true, restored: prev.id } : { ok: false, error: "tool changed state during revoke" };
+    with rv as (
+      update tools set status = 'revoked'
+      where id = ${toolId} and status = 'active' and sha = ${shaReviewed}
+        and exists (select 1 from tools p where p.id = ${prevId} and p.status = 'superseded')
+      returning id, family),
+    prv as (select id from tools where id = ${prevId} and status = 'superseded' and exists (select 1 from rv)),
+    appr as (insert into approvals(tool_id, decision, sha_at_decision, reviewer_id) select id, 'revoke'::text, ${shaReviewed}::text, ${reviewerId}::text from rv returning 1),
+    rs as (update tools set status = 'active' where id in (select id from prv) returning 1)
+    select (select count(*) from rv) as n, (select count(*) from prv) as p`) as { n: number; p: number }[];
+  return Number(r[0]?.n ?? 0) > 0 && Number(r[0]?.p ?? 0) > 0;
 }
