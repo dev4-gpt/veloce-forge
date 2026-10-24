@@ -5,7 +5,9 @@
 //
 // Usage:
 //   curl -H "x-demo-passcode: ..." https://<app>/api/evidence -o evidence.json
-//   node scripts/verify-report.mjs evidence.json [--pubkey <base64 SPKI>] [--head <hash you saved earlier>] [--margin 2]
+//   node scripts/verify-report.mjs evidence.json [--pubkey <base64 SPKI>] [--signed-from <seq>] [--head <hash you saved earlier>] [--margin 2]
+//   --signed-from N: with --pubkey, only entries from sequence N on must be signed (earlier ones predate the signing key). A signed entry
+//   authenticates every entry before it, because each hash covers the previous one.
 //
 // Exit code: 0 = verified, 1 = problems found, 2 = bad usage / unreadable file.
 //
@@ -39,7 +41,7 @@ function auditCountsOk(held, cand, prev) {
   return 10 * (held.pass * cand.total - cand.pass * held.total) <= AUDIT_MAX_GAP_TENTHS * held.total * cand.total;
 }
 
-export function verify(entries, { pubkey, head, margin = 2 } = {}) {
+export function verify(entries, { pubkey, head, margin = 2, signedFrom } = {}) {
   const problems = [];
   let prev = GENESIS;
   let signed = 0;
@@ -51,6 +53,8 @@ export function verify(entries, { pubkey, head, margin = 2 } = {}) {
   const seen = new Set();
   const legacy = new Set(); // tools declared as pre-chain by epoch entries anywhere in the chain
   for (const e of entries) if (e.body?.kind === "epoch") for (const id of e.body.legacyToolIds ?? []) legacy.add(id);
+  if (signedFrom !== undefined && (!Number.isInteger(signedFrom) || signedFrom < 1)) problems.push("signedFrom must be a whole number of 1 or more");
+  if (signedFrom !== undefined && !pubkey) problems.push("signedFrom needs a pinned public key");
   const pub = pubkey ? createPublicKey({ key: Buffer.from(pubkey, "base64"), format: "der", type: "spki" }) : null;
 
   entries.forEach((e, i) => {
@@ -69,7 +73,7 @@ export function verify(entries, { pubkey, head, margin = 2 } = {}) {
     if (e.sig) {
       signed++;
       if (pub && !edVerify(null, Buffer.from(String(e.hash), "utf8"), pub, Buffer.from(e.sig, "base64"))) problems.push(`${at}: signature does not verify against the pinned key`);
-    } else if (pub) problems.push(`${at}: unsigned, but a public key was pinned`);
+    } else if (pub && (signedFrom === undefined || e.seq >= signedFrom)) problems.push(`${at}: unsigned, but a public key was pinned`);
 
     const b = e.body ?? {};
     if (b.kind === "round") {
@@ -120,6 +124,10 @@ export function verify(entries, { pubkey, head, margin = 2 } = {}) {
     } else problems.push(`${at}: unknown entry kind`);
   });
 
+  // A signed entry authenticates everything before it (each hash covers the previous one), so the pinned key only proves something if at
+  // least one entry in the signed range exists.
+  if (pub && signedFrom !== undefined && !entries.some((e) => e.seq >= signedFrom)) problems.push(`no entry at or after sequence ${signedFrom}, so nothing was authenticated by the pinned key`);
+
   if (head && !entries.some((e) => e.hash === head)) problems.push(entries.length ? "the expected head hash is not in this chain (entries were removed or replaced)" : "the chain is empty but a head hash was expected");
   return { ok: problems.length === 0, entries: entries.length, head: entries.at(-1)?.hash ?? null, signed: signed === 0 ? "none" : signed === entries.length ? "all" : "mixed", problems };
 }
@@ -133,7 +141,7 @@ function arg(name) {
 if (import.meta.url === `file://${process.argv[1]}`) {
   const file = process.argv[2];
   if (!file || file.startsWith("--")) {
-    console.error("usage: node scripts/verify-report.mjs evidence.json [--pubkey <base64>] [--head <hash>] [--margin 2]");
+    console.error("usage: node scripts/verify-report.mjs evidence.json [--pubkey <base64>] [--signed-from <seq>] [--head <hash>] [--margin 2]");
     process.exit(2);
   }
   let doc;
@@ -145,10 +153,16 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     process.exit(2);
   }
   const pubkey = arg("--pubkey");
-  const res = verify(doc.entries, { pubkey, head: arg("--head"), margin: arg("--margin") ? Number(arg("--margin")) : 2 });
+  const signedFromRaw = arg("--signed-from");
+  const signedFrom = signedFromRaw === undefined ? undefined : Number(signedFromRaw);
+  if (signedFromRaw !== undefined && (!pubkey || !Number.isInteger(signedFrom) || signedFrom < 1)) {
+    console.error("--signed-from needs --pubkey and a whole number of 1 or more");
+    process.exit(2);
+  }
+  const res = verify(doc.entries, { pubkey, head: arg("--head"), margin: arg("--margin") ? Number(arg("--margin")) : 2, signedFrom });
   console.log(`entries checked : ${res.entries}`);
   console.log(`head hash       : ${res.head ?? "(empty chain)"}   <- save this; a later export must still contain it`);
-  console.log(`signatures      : ${res.signed}${pubkey ? " (checked against the key you pinned)" : doc.publicKey ? " (NOT checked: the key in the file proves nothing unless you pin it with --pubkey)" : ""}`);
+  console.log(`signatures      : ${res.signed}${pubkey ? ` (checked against the key you pinned${signedFrom ? `, required from entry #${signedFrom} on` : ""})` : doc.publicKey ? " (NOT checked: the key in the file proves nothing unless you pin it with --pubkey)" : ""}`);
   if (res.signed === "none") console.log("note            : unsigned chain = consistency only. Whoever can write the database could have rebuilt it.");
   if (res.problems.length) {
     console.log(`\nFAILED: ${res.problems.length} problem(s)`);
