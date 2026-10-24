@@ -17,9 +17,13 @@ export interface Proposal {
   model: string;
 }
 
-const SYSTEM =
+export const SYSTEM =
   "You write one Python 3 module that defines `normalize(raw: str)` using only the standard library (re, datetime, math, decimal, " +
   "fractions, string, calendar, unicodedata, functools, itertools, typing). No file, network, subprocess, eval/exec or os/sys use. " +
+  "Your code is screened before it is run and is REJECTED, without running, if it uses: any name or attribute that starts and ends with two " +
+  "underscores (such as __name__, __class__, __import__; assigning `__all__` is the one exception), a string containing two underscores in a row, " +
+  "getattr/setattr/delattr/vars/globals/locals, open/input/compile, the `.format(` or `.format_map(` string methods (use f-strings or % instead), " +
+  "or more than 8000 characters. " +
   "You are shown failing example cases (input, expected, your output). Generalise: do NOT hardcode the examples; handle the format " +
   "variants a reasonable user would write, following the rules in the task. Return the complete module.";
 

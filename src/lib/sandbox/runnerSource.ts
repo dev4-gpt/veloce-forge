@@ -47,7 +47,8 @@ for node in ast.walk(tree):
     elif isinstance(node, ast.Name):
         if node.id in BANNED_NAMES:
             reasons.append("banned name: " + node.id)
-        elif node.id.startswith("__") and node.id.endswith("__"):
+        elif node.id.startswith("__") and node.id.endswith("__") and not (node.id == "__all__" and isinstance(node.ctx, ast.Store)):
+            # a plain assignment to __all__ is a harmless list that models like to write; every other dunder name stays blocked
             reasons.append("dunder name: " + node.id)
     elif isinstance(node, ast.Attribute):
         if node.attr.startswith("__") and node.attr.endswith("__"):
