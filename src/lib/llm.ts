@@ -63,6 +63,13 @@ export const callCapMs = (env: NodeJS.ProcessEnv = process.env) => {
   return Number.isFinite(n) && n > 0 ? n : 45_000;
 };
 
+/** Output budget requested from every provider (LLM_MAX_OUTPUT_TOKENS, default 8192). Reasoning models spend part of it thinking, and a
+ *  reply cut off mid-string is unparseable JSON: seen live when a Groq reply ended inside the code string. */
+export const maxOutputTokens = (env: NodeJS.ProcessEnv = process.env) => {
+  const n = Number(env.LLM_MAX_OUTPUT_TOKENS ?? 8192);
+  return Number.isInteger(n) && n >= 256 ? n : 8192;
+};
+
 export const RETRY_MIN_REMAINING_MS = 15_000; // do not start a retry or a new provider with less than this left in the budget
 export const totalBudgetMs = (env: NodeJS.ProcessEnv = process.env) => {
   const n = Number(env.LLM_TOTAL_BUDGET_MS ?? 100_000);
@@ -110,6 +117,7 @@ async function viaGemini(system: string, user: string, timeoutMs = 90_000): Prom
       contents: [{ role: "user", parts: [{ text: user }] }],
       generationConfig: {
         temperature: 0.2,
+        maxOutputTokens: maxOutputTokens(),
         responseMimeType: "application/json",
         responseSchema: {
           type: "OBJECT",
@@ -143,6 +151,7 @@ async function viaOpenAICompat(c: OpenAICompat, system: string, user: string, ti
       body: JSON.stringify({
         model,
         temperature: 0.2,
+        max_tokens: maxOutputTokens(),
         ...(jsonMode ? { response_format: { type: "json_object" } } : {}),
         messages: [
           { role: "system", content: system + ' Respond with a single JSON object: {"rationale": string, "code": string}.' },
@@ -189,13 +198,23 @@ export async function completeJSON(system: string, user: string): Promise<{ comp
       break;
     }
     try {
-      const completion = await withRetry(
-        () => (p === "gemini" ? viaGemini(system, user, callTimeout()) : viaOpenAICompat(OPENAI_COMPAT[p], system, user, callTimeout())),
+      // The reply is parsed INSIDE the retried call: a truncated or malformed reply is retried on the same provider (it is usually a
+      // one-off), then the next provider is tried.
+      const { completion, json } = await withRetry(
+        async () => {
+          const c = p === "gemini" ? await viaGemini(system, user, callTimeout()) : await viaOpenAICompat(OPENAI_COMPAT[p], system, user, callTimeout());
+          let j: { rationale?: string; code?: string };
+          try {
+            j = JSON.parse(extractJson(c.text));
+          } catch (e) {
+            throw new ProviderError(`${p} returned unparseable JSON (${e instanceof Error ? e.message.slice(0, 80) : "parse error"})`, null);
+          }
+          if (!j.code) throw new ProviderError(`${p} reply had no code`, null);
+          return { completion: c, json: j };
+        },
         retryDelays(),
         () => remaining() >= RETRY_MIN_REMAINING_MS,
       );
-      const json = JSON.parse(extractJson(completion.text));
-      if (!json.code) throw new Error("no code in response");
       return { completion, json, tried: [...errors.map((e) => e.split(":")[0]), p] };
     } catch (e) {
       errors.push(`${p}: ${e instanceof Error ? e.message : String(e)}`);
