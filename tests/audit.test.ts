@@ -9,8 +9,8 @@ import { join } from "node:path";
 import { after, before, beforeEach, test } from "node:test";
 import { PGlite } from "@electric-sql/pglite";
 import { FAMILIES, sha256, type Case } from "../src/lib/bench/cases";
-import { __setSqlForTests, credit, ensureSchema, getActive, getTool, getWallet, insertTool, review, seedHeldoutSet, sql } from "../src/lib/db";
-import { auditKey, decideAudit, getAudit, latestAuditFor, previousTool, revokeTool, saveAudit } from "../src/lib/audit";
+import { __setSqlForTests, applyReview, credit, getHeldoutSet, ensureSchema, getActive, getTool, getWallet, insertTool, review, seedHeldoutSet, sql } from "../src/lib/db";
+import { applyRevoke, auditKey, decideAudit, getAudit, latestAuditFor, previousTool, revokeTool, saveAudit } from "../src/lib/audit";
 import { AUDIT_CAP_MICROS, runAuditForTool, type AuditSandbox } from "../src/lib/auditRun";
 import { auditCountsOk, type AuditBody } from "../src/lib/evidence";
 import { allowedImports, type RunnerOutput } from "../src/lib/gate";
@@ -333,4 +333,39 @@ test("a revoked version is skipped when looking for what a later tool replaced",
 test("the audit runner imports follow the family spec, and the audit is paid through the wallet payer", () => {
   assert.ok(allowedImports(FAMILIES.orchestrate.extraImports).includes("json"));
   assert.equal(walletPayer("r", 1).mode, "wallet");
+});
+
+// ---------- single-shot decisions (found live: a double submit recorded one approval twice) ----------
+const approvalRows = async (toolId: string) => Number(((await sql()`select count(*) as n from approvals where tool_id = ${toolId}`) as { n: number }[])[0].n);
+
+test("the approval statement itself is single-shot: a second identical call changes nothing and records nothing", async () => {
+  await seedSets(false);
+  await getActive("dates");
+  const code = GOOD;
+  const heldSha = (await getHeldoutSet("dates"))!.sha;
+  await insertTool({ id: "t-dates-v1", family: "dates", version: 1, code, sha: sha256(code), status: "proposed", visible_count: 6, heldout_count: 6, heldout_pass: Array(6).fill(true), heldout_sha: heldSha, round_id: null, rationale: "x", gate: { passed: true, reasons: [] } });
+  assert.equal(await applyReview("t-dates-v1", "approve", sha256(code), "u-rev"), true);
+  assert.equal(await applyReview("t-dates-v1", "approve", sha256(code), "u-rev"), false); // the race the JavaScript pre-check cannot close
+  assert.equal(await approvalRows("t-dates-v1"), 1);
+  assert.equal(await applyReview("t-dates-v1", "reject", sha256(code), "u-rev"), false); // and it cannot be flipped afterwards
+  assert.equal((await getTool("t-dates-v1"))!.status, "active");
+  const active = (await sql()`select count(*) as n from tools where family = 'dates' and status = 'active'`) as { n: number }[];
+  assert.equal(Number(active[0].n), 1);
+});
+
+test("the revoke statement is single-shot too: one revoke row, and the previous version is restored exactly once", async () => {
+  const v1 = await promote(GOOD, 6, 1);
+  const v2 = await promote(cheat(HELD), 6, 2);
+  assert.equal(await applyRevoke(v2.id, v2.sha, v1.id, "u-rev"), true);
+  assert.equal(await applyRevoke(v2.id, v2.sha, v1.id, "u-rev"), false);
+  assert.equal(await approvalRows(v2.id), 2); // the original approval + exactly one revoke
+  assert.equal((await getActive("dates")).id, v1.id);
+});
+
+test("revoke is refused when the version it should restore is not available, and then nothing is revoked", async () => {
+  const v1 = await promote(GOOD, 6, 1);
+  const v2 = await promote(cheat(HELD), 6, 2);
+  await sql()`update tools set status = 'rejected' where id = ${v1.id}`; // the restore target is gone
+  assert.equal(await applyRevoke(v2.id, v2.sha, v1.id, "u-rev"), false);
+  assert.equal((await getTool(v2.id))!.status, "active");
 });

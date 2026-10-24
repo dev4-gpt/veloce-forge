@@ -54,6 +54,7 @@ export default function Home() {
   const [pick, setPick] = useState("");
   const [replaying, setReplaying] = useState(false);
   const [cardHold, setCardHold] = useState(false);
+  const [reviewing, setReviewing] = useState(false);
   const timeline = useRef<HTMLDivElement>(null);
   const authHeaders = (): Record<string, string> => (passcode ? { "x-demo-passcode": passcode, "x-reviewer-token": passcode } : {});
 
@@ -165,10 +166,16 @@ export default function Home() {
   }
 
   async function reviewTool(id: string, sha: string, decision: "approve" | "reject" | "revoke") {
+    if (reviewing) return; // a second click while the first is in flight must not send a second decision
+    setReviewing(true);
+    try {
     const r = await fetch(`/api/tools/${id}/review`, { method: "POST", headers: authHeaders(), body: JSON.stringify({ decision, sha }) });
     const j = await r.json();
     setNotice(r.ok ? (decision === "approve" ? `Approved and promoted. The library now uses this version. Fresh audit: ${j.audit?.status === "skipped" ? `skipped (${j.audit.reason})` : j.audit?.status ?? "not run"}.` : decision === "revoke" ? "Revoked. The previous version is active again." : "Rejected.") : `Review refused: ${j.error}`);
     refresh();
+    } finally {
+      setReviewing(false);
+    }
   }
 
   const proposals = state?.families.flatMap((f) => f.history.filter((h) => h.status === "proposed").map((h) => ({ ...h, family: f.title }))) ?? [];
@@ -235,7 +242,7 @@ export default function Home() {
                     <span className="font-mono">v{h.version} · {h.heldout ?? "?"}/{f.heldoutTotal}</span>
                     <span className="flex items-center gap-1">
                       {h.audit && <span title={h.audit.status === "failed" ? h.audit.reasons.join("; ") : "scored on a frozen audit set that never took part in a promotion decision"} className={`rounded px-1.5 py-0.5 ${h.audit.status === "passed" ? chip.active : chip.rejected}`}>{h.audit.status === "passed" ? "audit passed" : "AUDIT FAILED"}</span>}
-                      {h.status === "active" && h.audit?.status === "failed" && <button onClick={() => reviewTool(h.id, h.sha, "revoke")} className="rounded border border-rose-500 px-1.5 py-0.5 text-rose-700 dark:text-rose-300" title="Take this version out of service; the version it replaced becomes active again">Revoke</button>}
+                      {h.status === "active" && h.audit?.status === "failed" && <button onClick={() => reviewTool(h.id, h.sha, "revoke")} disabled={reviewing} className="rounded border border-rose-500 px-1.5 py-0.5 text-rose-700 dark:text-rose-300" title="Take this version out of service; the version it replaced becomes active again">Revoke</button>}
                       <span className={`rounded px-1.5 py-0.5 ${chip[h.status] ?? chip.superseded}`}>{h.status}</span>
                     </span>
                   </li>
@@ -292,8 +299,8 @@ export default function Home() {
               <pre className="mt-2 max-h-48 overflow-auto rounded bg-zinc-50 p-2 text-[11px] dark:bg-zinc-900">{p.code}</pre>
               {p.stale && <div className="mt-2 rounded bg-red-50 p-2 text-[11px] text-red-800 dark:bg-red-950/40 dark:text-red-200">Stale: scored against a different held-out set than the one in force now, so it cannot be approved. Reject it and re-run the round.</div>}
               <div className="mt-2 flex gap-2">
-                <button onClick={() => reviewTool(p.id, p.sha, "approve")} disabled={p.stale} title={p.stale ? "scored against a different held-out set; re-run the round" : undefined} className="rounded bg-emerald-600 px-3 py-1 text-white disabled:cursor-not-allowed disabled:opacity-40">Approve and promote</button>
-                <button onClick={() => reviewTool(p.id, p.sha, "reject")} className="rounded border border-zinc-300 px-3 py-1 dark:border-zinc-700">Reject</button>
+                <button onClick={() => reviewTool(p.id, p.sha, "approve")} disabled={p.stale || reviewing} title={p.stale ? "scored against a different held-out set; re-run the round" : undefined} className="rounded bg-emerald-600 px-3 py-1 text-white disabled:cursor-not-allowed disabled:opacity-40">Approve and promote</button>
+                <button onClick={() => reviewTool(p.id, p.sha, "reject")} disabled={reviewing} className="rounded border border-zinc-300 px-3 py-1 disabled:opacity-40 dark:border-zinc-700">Reject</button>
               </div>
             </div>
           ))}

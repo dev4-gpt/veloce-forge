@@ -176,7 +176,7 @@ test("the set changing between the check and the promotion statement still block
   let raced = false;
   __setSqlForTests(async (strings, ...values) => {
     // Right before the promotion statement, another process re-seeds the family's set.
-    if (!raced && strings.join("").includes("with cand as")) {
+    if (!raced && strings.join("").includes("with act as")) {
       raced = true;
       await pg.query("update heldout_sets set sha = 'someone-else' where family = 'dates'");
     }

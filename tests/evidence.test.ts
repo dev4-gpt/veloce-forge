@@ -171,8 +171,9 @@ test("an approval must follow a proposed round with the same hash", () => {
   both(chain([round({ status: "rejected", gate: { passed: false, reasons: [] } }), decision()]), {}, 'not "proposed"');
 });
 
-test("a tool cannot be decided twice, and the starter cannot review their own round", () => {
+test("a tool cannot be decided twice with DIFFERENT outcomes or by different people, and the starter cannot review their own round", () => {
   both(chain([round(), decision(), decision({ decision: "reject" })]), {}, "decided more than once");
+  both(chain([round(), decision(), decision({ reviewerId: "u-someone-else" })]), {}, "decided more than once");
   both(chain([round({ startedBy: "u-op" }), decision({ reviewerId: "u-op" })]), {}, "separation of duties");
   // demo mode: the shared passcode is one pseudo identity and is exempt, as in the database rule
   assert.equal(both(chain([round({ startedBy: "shared-passcode" }), decision({ reviewerId: "shared-passcode" })])).ok, true);
@@ -210,7 +211,7 @@ test("an audit needs a prior approval, must have proven blocked egress, and cann
 test("revoke needs an earlier approval, happens once, and the separation-of-duties rule does not apply to it", () => {
   both(chain([round(), decision({ decision: "revoke" })]), {}, "never approved");
   both(chain([round(), decision({ decision: "reject" }), decision({ decision: "revoke" })]), {}, "never approved");
-  both(chain([round(), decision(), decision({ decision: "revoke" }), decision({ decision: "revoke" })]), {}, "revoked more than once");
+  both(chain([round(), decision(), decision({ decision: "revoke" }), decision({ decision: "revoke", reviewerId: "u-rev2" })]), {}, "revoked more than once");
   // the person who started the round may take their own promoted tool out of service
   assert.equal(both(chain([round({ startedBy: "u-op" }), decision({ reviewerId: "u-rev" }), decision({ decision: "revoke", reviewerId: "u-op" })])).ok, true);
   // ...but still may not approve it
@@ -243,7 +244,7 @@ test("an epoch entry needs a real list of tool ids", () => {
 test("a legacy approval still allows its later audit and revoke, and an approval still cannot happen twice", () => {
   const ok = chain([decision(), epoch(), audit(), decision({ decision: "revoke", reviewerId: "u-rev2" })]);
   assert.equal(both(ok).ok, true);
-  both(chain([decision(), decision(), epoch()]), {}, "decided more than once");
+  both(chain([decision(), decision({ reviewerId: "u-other" }), epoch()]), {}, "decided more than once");
 });
 
 
@@ -312,6 +313,19 @@ test("cli: --signed-from works, prints what it required, and rejects bad usage w
   assert.equal(spawnSync("node", [script, f, "--signed-from", "3"], { encoding: "utf8" }).status, 2); // no key
   assert.equal(spawnSync("node", [script, f, "--pubkey", pub, "--signed-from", "abc"], { encoding: "utf8" }).status, 2);
   assert.equal(spawnSync("node", [script, f, "--pubkey", pub, "--signed-from", "0"], { encoding: "utf8" }).status, 2);
+});
+
+// ---------- double submit (found live: one approval recorded twice) ----------
+test("an EXACT repeat of a decision (same tool, decision, hash and reviewer) is a double submit and is tolerated, in both implementations", () => {
+  assert.equal(both(chain([round(), decision(), decision()])).ok, true);
+  assert.equal(both(chain([round(), decision(), decision(), audit()])).ok, true); // and the audit still follows the approval
+  const rev = decision({ decision: "revoke", reviewerId: "u-rev2" });
+  assert.equal(both(chain([round(), decision(), rev, rev])).ok, true);
+});
+
+test("a repeat does not hide a real second decision that follows it", () => {
+  both(chain([round(), decision(), decision(), decision({ decision: "reject" })]), {}, "decided more than once");
+  both(chain([round(), decision(), decision(), decision({ shaAtDecision: sha256hex("other") })]), {}, "differs from the code the round produced");
 });
 
 // ---------- events ----------
