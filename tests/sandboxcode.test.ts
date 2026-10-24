@@ -156,3 +156,18 @@ test("the runner alone does NOT block dunder attribute tricks: the syntax-tree s
   assert.equal(screen(code).ok, false); // layer 1 catches it
   assert.deepEqual(runner(code, ["x"]).outputs, [{ ok: "tuple" }]); // layer 2 alone would not
 });
+
+// ---- __all__: a plain assignment is allowed (models write it); every other dunder use stays blocked ----
+test("assigning __all__ is allowed, but reading it, or any other dunder name, is still rejected", () => {
+  assert.equal(screen('__all__ = ["normalize"]\n' + wrap("return raw")).ok, true);
+  assert.match(screen("x = __all__\n" + wrap("return raw")).reasons.join(), /dunder name: __all__/);
+  assert.match(screen('__name__ = "x"\n' + wrap("return raw")).reasons.join(), /dunder name: __name__/);
+  assert.match(screen('__all__ = ["a"]\n' + wrap("return __all__")).reasons.join(), /dunder name: __all__/);
+  assert.match(screen('__all__ = ["a"]\n' + wrap("return raw.__class__")).reasons.join(), /dunder attribute/);
+  assert.equal(screen("def normalize(raw):\n    __all__ = [1]\n    return raw\n").ok, true); // still just an assignment
+});
+
+test("the proposer is told the screen rules, so it can avoid them", async () => {
+  const { SYSTEM } = await import("../src/lib/gemini");
+  for (const rule of ["two underscores", "__all__", "getattr", ".format(", "f-strings", "8000"]) assert.ok(SYSTEM.includes(rule), `prompt must mention: ${rule}`);
+});
