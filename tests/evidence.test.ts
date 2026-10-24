@@ -17,7 +17,7 @@ import {
 } from "../src/lib/evidence";
 // @ts-ignore plain .mjs on purpose: the offline verifier has no build step and no TypeScript
 import { verify as offlineVerifyRaw } from "../scripts/verify-report.mjs";
-const offlineVerify = offlineVerifyRaw as (e: Entry[], o?: { pubkey?: string; head?: string; margin?: number }) => { ok: boolean; problems: string[] };
+const offlineVerify = offlineVerifyRaw as (e: Entry[], o?: { pubkey?: string; head?: string; margin?: number; signedFrom?: number }) => { ok: boolean; problems: string[] };
 
 const CODE = "def normalize(raw):\n    return raw.strip()\n";
 
@@ -47,8 +47,8 @@ function newKey() {
 }
 
 /** Both implementations must agree on pass/fail and on the exact problems; a failing chain must mention `needle`. */
-function both(es: Entry[], opts: { pubkey?: string; head?: string } = {}, needle?: string) {
-  const a = verifyChain(es, { publicKeyB64: opts.pubkey, expectHead: opts.head });
+function both(es: Entry[], opts: { pubkey?: string; head?: string; signedFrom?: number } = {}, needle?: string) {
+  const a = verifyChain(es, { publicKeyB64: opts.pubkey, expectHead: opts.head, signedFrom: opts.signedFrom });
   const b = offlineVerify(es, opts);
   assert.equal(a.ok, b.ok, `implementations disagree: server=${JSON.stringify(a.problems)} offline=${JSON.stringify(b.problems)}`);
   assert.deepEqual(a.problems, b.problems);
@@ -244,6 +244,74 @@ test("a legacy approval still allows its later audit and revoke, and an approval
   const ok = chain([decision(), epoch(), audit(), decision({ decision: "revoke", reviewerId: "u-rev2" })]);
   assert.equal(both(ok).ok, true);
   both(chain([decision(), decision(), epoch()]), {}, "decided more than once");
+});
+
+
+// ---------- --signed-from: a chain whose first entries predate the signing key ----------
+/** Entries 1-2 unsigned (before the key existed), entries 3-4 signed, as in the live chain. */
+function mixed() {
+  const { signer, pub } = newKey();
+  const out: Entry[] = [];
+  const bodies: ReportBody[] = [round({ roundId: "r-1", toolId: "t-1" }), round({ roundId: "r-2", toolId: "t-2" }), round({ roundId: "r-3", toolId: "t-3" }), round({ roundId: "r-4", toolId: "t-4" })];
+  bodies.forEach((b, i) => out.push(makeEntry(i + 1, i ? out[i - 1].hash : GENESIS, b, i >= 2 ? signer : null)));
+  return { es: out, pub, signer };
+}
+
+test("pinning a key without --signed-from flags the unsigned early entries; with it they are accepted", () => {
+  const { es, pub } = mixed();
+  both(es, { pubkey: pub }, "unsigned, but a public key was pinned");
+  assert.equal(both(es, { pubkey: pub, signedFrom: 3 }).ok, true);
+});
+
+test("from the signed range on, every entry must be signed and valid: stripping or forging a later signature is caught", () => {
+  const { es, pub } = mixed();
+  const stripped = clone(es);
+  delete stripped[3].sig;
+  both(stripped, { pubkey: pub, signedFrom: 3 }, "entry #4: unsigned");
+  const other = newKey();
+  const swapped = clone(es);
+  swapped[3] = makeEntry(4, swapped[2].hash, es[3].body, other.signer); // signed by someone else
+  both(swapped, { pubkey: pub, signedFrom: 3 }, "entry #4: signature does not verify");
+});
+
+test("a signed entry authenticates everything before it: editing an unsigned early entry breaks the link to the signed tail", () => {
+  const { es, pub } = mixed();
+  const edited = clone(es);
+  (edited[0].body as RoundBody).costMicros = 1;
+  const r = both(edited, { pubkey: pub, signedFrom: 3 });
+  assert.equal(r.ok, false);
+});
+
+test("an early entry that DOES carry a signature is still checked", () => {
+  const { es, pub } = mixed();
+  const early = newKey();
+  const withEarly = clone(es);
+  withEarly[0] = makeEntry(1, GENESIS, es[0].body, early.signer); // signed by a different key, below signedFrom
+  // its hash is unchanged by the signature, so the chain still links; only the signature is wrong for the pinned key
+  both(withEarly, { pubkey: pub, signedFrom: 3 }, "entry #1: signature does not verify");
+});
+
+test("--signed-from beyond the end of the chain, or without a key, or malformed, is an error rather than a silent pass", () => {
+  const { es, pub } = mixed();
+  both(es, { pubkey: pub, signedFrom: 5 }, "nothing was authenticated by the pinned key");
+  both(es, { signedFrom: 3 }, "signedFrom needs a pinned public key");
+  both(es, { pubkey: pub, signedFrom: 0 }, "whole number of 1 or more");
+  both(es, { pubkey: pub, signedFrom: 2.5 }, "whole number of 1 or more");
+});
+
+test("cli: --signed-from works, prints what it required, and rejects bad usage with exit 2", () => {
+  const { es, pub } = mixed();
+  const dir = mkdtempSync(join(tmpdir(), "sf-"));
+  const f = join(dir, "e.json");
+  writeFileSync(f, JSON.stringify({ publicKey: pub, entries: es }));
+  const script = join(process.cwd(), "scripts", "verify-report.mjs");
+  const ok = execFileSync("node", [script, f, "--pubkey", pub, "--signed-from", "3"], { encoding: "utf8" });
+  assert.match(ok, /VERIFIED/);
+  assert.match(ok, /required from entry #3 on/);
+  assert.equal(spawnSync("node", [script, f, "--pubkey", pub], { encoding: "utf8" }).status, 1); // unsigned early entries flagged without it
+  assert.equal(spawnSync("node", [script, f, "--signed-from", "3"], { encoding: "utf8" }).status, 2); // no key
+  assert.equal(spawnSync("node", [script, f, "--pubkey", pub, "--signed-from", "abc"], { encoding: "utf8" }).status, 2);
+  assert.equal(spawnSync("node", [script, f, "--pubkey", pub, "--signed-from", "0"], { encoding: "utf8" }).status, 2);
 });
 
 // ---------- events ----------

@@ -160,7 +160,8 @@ export function makeEntry(seq: number, prev: string, body: ReportBody, signer: S
 
 // ---- verification (same rules the offline script applies) ----
 export interface VerifyOptions {
-  publicKeyB64?: string; // pin a key: every entry must then carry a valid signature from it
+  publicKeyB64?: string; // pin a key: every entry (from signedFrom on, if set) must then carry a valid signature from it
+  signedFrom?: number; // first sequence number that must be signed; earlier entries predate the key. Needs publicKeyB64
   expectHead?: string; // a head hash you saved earlier: detects truncation of newer entries
   margin?: number; // required held-out improvement for a promotion (default 2, = HELDOUT_MARGIN)
 }
@@ -187,6 +188,9 @@ export function verifyChain(entries: Entry[], opts: VerifyOptions = {}): VerifyR
   const legacy = new Set<string>(); // declared by epoch entries anywhere in the chain
   for (const e of entries) if (e.body?.kind === "epoch") for (const id of e.body.legacyToolIds ?? []) legacy.add(id);
   let pub: KeyObject | null = null;
+  const signedFrom = opts.signedFrom;
+  if (signedFrom !== undefined && (!Number.isInteger(signedFrom) || signedFrom < 1)) problems.push("signedFrom must be a whole number of 1 or more");
+  if (signedFrom !== undefined && !opts.publicKeyB64) problems.push("signedFrom needs a pinned public key");
   if (opts.publicKeyB64) pub = createPublicKey({ key: Buffer.from(opts.publicKeyB64, "base64"), format: "der", type: "spki" });
 
   entries.forEach((e, i) => {
@@ -208,7 +212,7 @@ export function verifyChain(entries: Entry[], opts: VerifyOptions = {}): VerifyR
         const okSig = edVerify(null, Buffer.from(e.hash, "utf8"), pub, Buffer.from(e.sig, "base64"));
         if (!okSig) problems.push(`${at}: signature does not verify against the pinned key`);
       }
-    } else if (pub) problems.push(`${at}: unsigned, but a public key was pinned`);
+    } else if (pub && (signedFrom === undefined || e.seq >= signedFrom)) problems.push(`${at}: unsigned, but a public key was pinned`);
 
     const b = e.body;
     if (b.kind === "round") {
@@ -262,6 +266,10 @@ export function verifyChain(entries: Entry[], opts: VerifyOptions = {}): VerifyR
       if (b.passed && !auditCountsOk(b.heldout, b.candidate, b.previous)) problems.push(`${at}: audit of ${b.toolId} is marked passed but its own numbers break the audit rule`);
     } else problems.push(`${at}: unknown entry kind`);
   });
+
+  // A signed entry authenticates everything before it (each hash covers the previous one), so the pinned key only proves something if at
+  // least one entry in the signed range exists.
+  if (pub && signedFrom !== undefined && !entries.some((e) => e.seq >= signedFrom)) problems.push(`no entry at or after sequence ${signedFrom}, so nothing was authenticated by the pinned key`);
 
   if (opts.expectHead && entries.length && !entries.some((e) => e.hash === opts.expectHead)) {
     problems.push("the expected head hash is not in this chain (entries were removed or replaced)");
