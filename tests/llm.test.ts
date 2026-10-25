@@ -1,10 +1,10 @@
 // Run: npx tsx --test tests/llm.test.ts
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, test } from "node:test";
-import { callCapMs, completeJSON, maxOutputTokens, configuredProviders, DEFAULT_ORDER, ProviderError, retryDelays, totalBudgetMs, withRetry } from "../src/lib/llm";
+import { callCapMs, completeJSON, maxOutputTokens, providerOrder, providerWarnings, resolveCompat, validBaseUrl, configuredProviders, DEFAULT_ORDER, ProviderError, retryDelays, totalBudgetMs, withRetry } from "../src/lib/llm";
 
 const realFetch = globalThis.fetch;
-const ENV_KEYS = ["LLM_PROVIDERS", "LLM_RETRY_DELAYS_MS", "LLM_TOTAL_BUDGET_MS", "LLM_CALL_TIMEOUT_MS", "LLM_MAX_OUTPUT_TOKENS", "GEMINI_API_KEY", "OPENROUTER_API_KEY", "OPENROUTER_MODEL", "NVIDIA_API_KEY", "NVIDIA_MODEL",
+const ENV_KEYS = ["LLM_PROVIDERS", "LLM_RETRY_DELAYS_MS", "LLM_TOTAL_BUDGET_MS", "LLM_CALL_TIMEOUT_MS", "LLM_MAX_OUTPUT_TOKENS", "LLM_TOGETHER_BASE_URL", "LLM_TOGETHER_API_KEY", "LLM_TOGETHER_MODEL", "LLM_MY_HOST_BASE_URL", "LLM_MY_HOST_API_KEY", "LLM_MY_HOST_MODEL", "GEMINI_API_KEY", "OPENROUTER_API_KEY", "OPENROUTER_MODEL", "NVIDIA_API_KEY", "NVIDIA_MODEL",
   "GROQ_API_KEY", "GROQ_MODEL", "MISTRAL_API_KEY", "MISTRAL_MODEL", "CEREBRAS_API_KEY", "CEREBRAS_MODEL", "SAMBANOVA_API_KEY", "SAMBANOVA_MODEL",
   "HUGGINGFACE_API_KEY", "HUGGINGFACE_MODEL", "LLM7_API_KEY", "LLM7_MODEL"];
 beforeEach(() => {
@@ -326,4 +326,89 @@ test("output budget parsing: default 8192; junk, tiny and fractional values fall
   assert.equal(maxOutputTokens({} as NodeJS.ProcessEnv), 8192);
   assert.equal(maxOutputTokens({ LLM_MAX_OUTPUT_TOKENS: "16000" } as unknown as NodeJS.ProcessEnv), 16000);
   for (const bad of ["abc", "10", "-5", "1000.5", ""]) assert.equal(maxOutputTokens({ LLM_MAX_OUTPUT_TOKENS: bad } as unknown as NodeJS.ProcessEnv), 8192, bad);
+});
+
+// ---------- provider warnings and custom providers ----------
+const E = (o: Record<string, string>) => o as unknown as NodeJS.ProcessEnv;
+
+test("a clean configuration has no warnings", () => {
+  assert.deepEqual(providerWarnings(E({ LLM_PROVIDERS: "groq,gemini", GEMINI_API_KEY: "g", GROQ_API_KEY: "k", GROQ_MODEL: "m" })), []);
+});
+
+test("a misspelled provider name is reported with a 'did you mean' and how to add a custom one (the grok-for-groq typo)", () => {
+  const w = providerWarnings(E({ LLM_PROVIDERS: "grok,gemini", GEMINI_API_KEY: "g", GROQ_API_KEY: "k", GROQ_MODEL: "m" }));
+  const text = w.join(" | ");
+  assert.match(text, /"grok" in LLM_PROVIDERS is not a known provider, so it is ignored\. Did you mean "groq"\?/);
+  assert.match(text, /LLM_GROK_BASE_URL, LLM_GROK_API_KEY and LLM_GROK_MODEL/);
+  assert.match(text, /GROQ_API_KEY and GROQ_MODEL are set but "groq" is not in LLM_PROVIDERS/); // the real provider is configured but unused
+});
+
+test("a name far from every known provider gets no suggestion", () => {
+  const text = providerWarnings(E({ LLM_PROVIDERS: "zzzzzz,gemini", GEMINI_API_KEY: "g" })).join(" | ");
+  assert.match(text, /"zzzzzz" in LLM_PROVIDERS is not a known provider/);
+  assert.doesNotMatch(text, /Did you mean/);
+});
+
+test("a listed provider missing its key or model, or gemini without a key, is reported; nothing usable is reported", () => {
+  const a = providerWarnings(E({ LLM_PROVIDERS: "groq,gemini", GEMINI_API_KEY: "g", GROQ_API_KEY: "k" })).join(" | ");
+  assert.match(a, /"groq" is listed in LLM_PROVIDERS but GROQ_MODEL is not set/);
+  const b = providerWarnings(E({ LLM_PROVIDERS: "groq", })).join(" | ");
+  assert.match(b, /GROQ_API_KEY and GROQ_MODEL are not set/);
+  assert.match(providerWarnings(E({ LLM_PROVIDERS: "gemini" })).join(" | "), /GEMINI_API_KEY is not set/);
+  assert.match(providerWarnings(E({})).join(" | "), /No usable model provider is configured/);
+});
+
+test("without an explicit list, configured providers are not reported as unused", () => {
+  assert.deepEqual(providerWarnings(E({ GEMINI_API_KEY: "g", GROQ_API_KEY: "k", GROQ_MODEL: "m" })), []);
+});
+
+test("names are case-insensitive and trimmed: ' Groq , GEMINI ' works like 'groq,gemini'", () => {
+  assert.deepEqual(providerOrder(E({ LLM_PROVIDERS: " Groq , GEMINI " })), ["groq", "gemini"]);
+  assert.deepEqual(configuredProviders(E({ LLM_PROVIDERS: " Groq , GEMINI ", GEMINI_API_KEY: "g", GROQ_API_KEY: "k", GROQ_MODEL: "m" })), ["groq", "gemini"]);
+});
+
+test("a CUSTOM OpenAI-compatible provider is added with three variables and the name in LLM_PROVIDERS", async () => {
+  process.env.LLM_PROVIDERS = "together";
+  process.env.LLM_TOGETHER_BASE_URL = "https://api.example-llm.test/v1///";
+  process.env.LLM_TOGETHER_API_KEY = "secret-k";
+  process.env.LLM_TOGETHER_MODEL = "some-model";
+  assert.deepEqual(configuredProviders(), ["together"]);
+  assert.deepEqual(providerWarnings(), []);
+  const calls = counter(() => okChat());
+  const r = await completeJSON("s", "u");
+  assert.equal(r.completion.provider, "together");
+  assert.equal(calls[0].url, "https://api.example-llm.test/v1/chat/completions"); // trailing slashes tidied
+  assert.equal(JSON.parse(calls[0].body).model, "some-model");
+});
+
+test("custom provider names with a dash or underscore map to LLM_<NAME> with underscores", () => {
+  const env = E({ LLM_PROVIDERS: "my-host", LLM_MY_HOST_BASE_URL: "https://x.test/v1", LLM_MY_HOST_API_KEY: "k", LLM_MY_HOST_MODEL: "m" });
+  assert.deepEqual(configuredProviders(env), ["my-host"]);
+  assert.equal(resolveCompat("my-host", env)!.keyEnv, "LLM_MY_HOST_API_KEY");
+});
+
+test("a custom provider needs its key and model too, and the warning names the missing variable", () => {
+  const w = providerWarnings(E({ LLM_PROVIDERS: "together", LLM_TOGETHER_BASE_URL: "https://x.test/v1", LLM_TOGETHER_API_KEY: "k" })).join(" | ");
+  assert.match(w, /LLM_TOGETHER_MODEL is not set/);
+});
+
+test("a custom base URL must be plain https with no embedded login, or the provider is refused and the key is never sent", async () => {
+  for (const bad of ["http://x.test/v1", "https://user:pw@x.test/v1", "ftp://x.test", "not a url", "https://", ""]) {
+    assert.equal(validBaseUrl(bad), false, bad);
+  }
+  assert.equal(validBaseUrl("https://x.test/v1"), true);
+  const env = E({ LLM_PROVIDERS: "together", LLM_TOGETHER_BASE_URL: "http://x.test/v1", LLM_TOGETHER_API_KEY: "k", LLM_TOGETHER_MODEL: "m" });
+  assert.deepEqual(configuredProviders(env), []);
+  assert.match(providerWarnings(env).join(" | "), /LLM_TOGETHER_BASE_URL must be an https:\/\/ address/);
+  const calls = counter(() => okChat());
+  Object.assign(process.env, env);
+  await assert.rejects(() => completeJSON("s", "u"), /no LLM provider configured/);
+  assert.equal(calls.length, 0);
+});
+
+test("a custom provider cannot replace a built-in name or gemini, and invalid names are rejected", () => {
+  const env = E({ LLM_PROVIDERS: "groq,gemini,bad name!", LLM_GROQ_BASE_URL: "https://evil.test/v1", LLM_GEMINI_BASE_URL: "https://evil.test/v1", GROQ_API_KEY: "k", GROQ_MODEL: "m", GEMINI_API_KEY: "g" });
+  assert.equal(resolveCompat("groq", env)!.baseUrl, "https://api.groq.com/openai/v1"); // the built-in endpoint wins
+  assert.equal(resolveCompat("gemini", env), null);
+  assert.match(providerWarnings(env).join(" | "), /"bad name!" in LLM_PROVIDERS is not a valid provider name/);
 });

@@ -97,13 +97,93 @@ export async function withRetry<T>(fn: () => Promise<T>, delays: number[] = retr
   }
 }
 
+/** Provider names from LLM_PROVIDERS (or the default), trimmed and lowercased so "Groq" and "groq" mean the same thing. */
+export function providerOrder(env: NodeJS.ProcessEnv = process.env): string[] {
+  return (env.LLM_PROVIDERS || DEFAULT_ORDER).split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+}
+
+const envKeyFor = (name: string) => name.toUpperCase().replace(/[^A-Z0-9]/g, "_");
+
+/** The reasons a custom base URL is refused: the API key is sent there, so it must be a plain https address with no embedded login. */
+export function validBaseUrl(u: string | undefined): boolean {
+  if (!u) return false;
+  try {
+    const x = new URL(u);
+    return x.protocol === "https:" && !x.username && !x.password && Boolean(x.hostname) && !/\s/.test(u);
+  } catch {
+    return false;
+  }
+}
+
+/** Resolve a provider name to an OpenAI-compatible endpoint: a built-in one, or a CUSTOM one the operator adds with three variables
+ *  (no code change): LLM_<NAME>_BASE_URL (https only), LLM_<NAME>_API_KEY and LLM_<NAME>_MODEL, then put <name> in LLM_PROVIDERS.
+ *  Example: name "together" -> LLM_TOGETHER_BASE_URL, LLM_TOGETHER_API_KEY, LLM_TOGETHER_MODEL. */
+export function resolveCompat(name: string, env: NodeJS.ProcessEnv = process.env): OpenAICompat | null {
+  if (OPENAI_COMPAT[name]) return OPENAI_COMPAT[name];
+  if (name === "gemini" || !/^[a-z0-9][a-z0-9_-]{0,30}$/.test(name)) return null;
+  const k = envKeyFor(name);
+  const base = env[`LLM_${k}_BASE_URL`];
+  if (!validBaseUrl(base)) return null;
+  return { name, baseUrl: base!.replace(/\/+$/, ""), keyEnv: `LLM_${k}_API_KEY`, modelEnv: `LLM_${k}_MODEL` };
+}
+
 export function configuredProviders(env: NodeJS.ProcessEnv = process.env): string[] {
-  const order = (env.LLM_PROVIDERS || DEFAULT_ORDER).split(",").map((s) => s.trim()).filter(Boolean);
-  return order.filter((p) => {
+  return providerOrder(env).filter((p) => {
     if (p === "gemini") return Boolean(env.GEMINI_API_KEY);
-    const c = OPENAI_COMPAT[p];
+    const c = resolveCompat(p, env);
     return Boolean(c && env[c.keyEnv] && env[c.modelEnv]);
   });
+}
+
+function editDistance(a: string, b: string): number {
+  const d = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array(b.length).fill(0)]);
+  for (let j = 1; j <= b.length; j++) d[0][j] = j;
+  for (let i = 1; i <= a.length; i++) for (let j = 1; j <= b.length; j++) d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+  return d[a.length][b.length];
+}
+
+/** Human-readable problems with the provider settings. A misspelled or half-configured provider is otherwise dropped in silence, which
+ *  is how a typo like "grok" (xAI) for "groq" would quietly leave Gemini as the only provider. */
+export function providerWarnings(env: NodeJS.ProcessEnv = process.env): string[] {
+  const out: string[] = [];
+  const known = ["gemini", ...Object.keys(OPENAI_COMPAT)];
+  const order = providerOrder(env);
+  // Only an EXPLICIT list says what the operator wants. The default list names every provider, so a missing key there is normal.
+  const explicit = Boolean(env.LLM_PROVIDERS);
+  for (const p of order) {
+    const k = envKeyFor(p);
+    if (p === "gemini") {
+      if (explicit && !env.GEMINI_API_KEY) out.push('"gemini" is listed in LLM_PROVIDERS but GEMINI_API_KEY is not set, so it is ignored.');
+      continue;
+    }
+    const c = resolveCompat(p, env);
+    if (!c) {
+      if (env[`LLM_${k}_BASE_URL`]) {
+        out.push(`Custom provider "${p}": LLM_${k}_BASE_URL must be an https:// address with no login in it, so "${p}" is ignored.`);
+      } else if (!/^[a-z0-9][a-z0-9_-]{0,30}$/.test(p)) {
+        out.push(`"${p}" in LLM_PROVIDERS is not a valid provider name (use letters, digits, - or _), so it is ignored.`);
+      } else {
+        const near = known.map((n) => ({ n, d: editDistance(p, n) })).sort((x, y) => x.d - y.d)[0];
+        out.push(
+          `"${p}" in LLM_PROVIDERS is not a known provider, so it is ignored.` +
+            (near && near.d <= 2 ? ` Did you mean "${near.n}"?` : "") +
+            ` To add your own OpenAI-compatible provider, set LLM_${k}_BASE_URL, LLM_${k}_API_KEY and LLM_${k}_MODEL.`,
+        );
+      }
+      continue;
+    }
+    const missing = [c.keyEnv, c.modelEnv].filter((v) => !env[v]);
+    if (explicit && missing.length) out.push(`"${p}" is listed in LLM_PROVIDERS but ${missing.join(" and ")} ${missing.length > 1 ? "are" : "is"} not set, so it is ignored.`);
+  }
+  // keys that are set but whose provider is not in the list (only meaningful when the operator set an explicit list)
+  if (explicit) {
+    for (const n of Object.keys(OPENAI_COMPAT)) {
+      const c = OPENAI_COMPAT[n];
+      if (!order.includes(n) && env[c.keyEnv] && env[c.modelEnv]) out.push(`${c.keyEnv} and ${c.modelEnv} are set but "${n}" is not in LLM_PROVIDERS, so it is not used.`);
+    }
+  }
+  if (configuredProviders(env).length === 0) out.push("No usable model provider is configured: every round will fail until one is.");
+  return out;
 }
 
 async function viaGemini(system: string, user: string, timeoutMs = 90_000): Promise<Completion> {
@@ -185,7 +265,7 @@ function extractJson(text: string): string {
 /** Try each configured provider in order until one returns parseable JSON with a `code` field. */
 export async function completeJSON(system: string, user: string): Promise<{ completion: Completion; json: { rationale?: string; code?: string }; tried: string[] }> {
   const providers = configuredProviders();
-  if (providers.length === 0) throw new Error(`no LLM provider configured (set GEMINI_API_KEY, or a key + model for one of: ${Object.keys(OPENAI_COMPAT).join(", ")})`);
+  if (providers.length === 0) throw new Error(`no LLM provider configured (set GEMINI_API_KEY, or a key + model for one of: ${Object.keys(OPENAI_COMPAT).join(", ")}, or a custom one via LLM_<NAME>_BASE_URL / _API_KEY / _MODEL)`);
   const errors: string[] = [];
   const deadline = Date.now() + totalBudgetMs();
   const remaining = () => deadline - Date.now();
@@ -202,7 +282,7 @@ export async function completeJSON(system: string, user: string): Promise<{ comp
       // one-off), then the next provider is tried.
       const { completion, json } = await withRetry(
         async () => {
-          const c = p === "gemini" ? await viaGemini(system, user, callTimeout()) : await viaOpenAICompat(OPENAI_COMPAT[p], system, user, callTimeout());
+          const c = p === "gemini" ? await viaGemini(system, user, callTimeout()) : await viaOpenAICompat(resolveCompat(p)!, system, user, callTimeout());
           let j: { rationale?: string; code?: string };
           try {
             j = JSON.parse(extractJson(c.text));
