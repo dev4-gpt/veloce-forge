@@ -1,6 +1,7 @@
 // Read-only readiness checks for a deploy. Nothing here writes, migrates or prints a secret value: the database gatherer runs
 // SELECTs only (and never ensureSchema, so pointing it at production cannot change production).
 import { createPrivateKey } from "node:crypto";
+import { providerWarnings } from "./llm";
 
 export type Level = "block" | "warn" | "ok";
 export interface Check {
@@ -18,6 +19,7 @@ export interface EnvFacts {
   signingKey: "absent" | "valid" | "invalid";
   cardPolicy: string | null;
   providerCount: number;
+  llmWarnings: string[]; // misspelled or half-configured model providers (see providerWarnings in llm.ts)
 }
 
 export interface DbFacts {
@@ -60,6 +62,7 @@ export function gatherEnv(env: NodeJS.ProcessEnv = process.env): EnvFacts {
     signingKey,
     cardPolicy: env.CARD_CAPTURE_POLICY ?? null,
     providerCount: 1 + (env.OPENROUTER_API_KEY ? 1 : 0) + (env.NVIDIA_API_KEY ? 1 : 0),
+    llmWarnings: providerWarnings(env),
   };
 }
 
@@ -132,6 +135,7 @@ export function evaluate(env: EnvFacts, db: DbFacts, files: FileFacts): Check[] 
   else if (env.signingKey === "absent") add("warn", "REPORT_SIGNING_KEY", "not set: the report chain will be unsigned (consistency only, anyone who can write the database could rebuild it)");
   else add("ok", "REPORT_SIGNING_KEY", "valid Ed25519 key");
   if (env.cardPolicy && env.cardPolicy !== "always" && env.cardPolicy !== "on_green") add("warn", "CARD_CAPTURE_POLICY", `"${env.cardPolicy}" is not recognised and will behave as "always"`);
+  for (const w of env.llmWarnings ?? []) add("warn", "LLM_PROVIDERS", w);
   if (env.providerCount < 2) add("warn", "model providers", "only Gemini is configured; one rate-limit or outage stops every round (add OPENROUTER_API_KEY or NVIDIA_API_KEY)");
 
   // ---- database ----

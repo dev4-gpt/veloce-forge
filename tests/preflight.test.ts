@@ -9,7 +9,7 @@ import { evaluate, FAMILIES, gatherDb, gatherEnv, gatherFiles, type DbFacts, typ
 
 const goodEnv = (): EnvFacts => ({
   present: { CREATEOS_SANDBOX_API_KEY: true, GEMINI_API_KEY: true, NEON_POSTGRES_CONNECTION_STRING: true, DATABASE_URL: false, STRIPE_SECRET_KEY: true, STRIPE_WEBHOOK_SECRET: true, DEMO_PASSCODE: true, REPORT_SIGNING_KEY: true, OPENROUTER_API_KEY: true, NVIDIA_API_KEY: false },
-  stripeKeyIsTest: true, passcodeLength: 24, signingKey: "valid", cardPolicy: null, providerCount: 2,
+  stripeKeyIsTest: true, passcodeLength: 24, signingKey: "valid", cardPolicy: null, providerCount: 2, llmWarnings: [],
 });
 const sets = (n = 10) => ({ ...Object.fromEntries(FAMILIES.map((f) => [f, n])), e2e: 13, ...Object.fromEntries(FAMILIES.map((f) => [`audit:${f}`, n])) });
 const goodDb = (): DbFacts => ({
@@ -222,4 +222,12 @@ test("gatherDb reports an unreachable database instead of throwing", async () =>
   });
   assert.equal(f.reachable, false);
   assert.match(f.error ?? "", /connection refused/);
+});
+
+test("provider warnings reach the deploy check, and a typo in LLM_PROVIDERS is flagged", () => {
+  const env = gatherEnv({ LLM_PROVIDERS: "grok,gemini", GEMINI_API_KEY: "g", GROQ_API_KEY: "k", GROQ_MODEL: "m" } as unknown as NodeJS.ProcessEnv);
+  assert.ok(env.llmWarnings.some((w) => w.includes('Did you mean "groq"')));
+  const warns = evaluate(env, goodDb(), goodFiles()).filter((c) => c.item === "LLM_PROVIDERS");
+  assert.ok(warns.length >= 1 && warns.every((c) => c.level === "warn"));
+  assert.deepEqual(gatherEnv({ LLM_PROVIDERS: "groq,gemini", GEMINI_API_KEY: "g", GROQ_API_KEY: "k", GROQ_MODEL: "m" } as unknown as NodeJS.ProcessEnv).llmWarnings, []);
 });

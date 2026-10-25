@@ -1,6 +1,7 @@
 import { FAMILIES, FAMILY_LIST, PARTNER } from "@/lib/bench/cases";
 import { listAudits } from "@/lib/audit";
 import { chainHead } from "@/lib/chainStore";
+import { configuredProviders, providerWarnings } from "@/lib/llm";
 import { ensureSchema, getActive, getHeldoutSet, getWallet, isStaleProposal, listTools, recentLedger } from "@/lib/db";
 
 
@@ -44,5 +45,5 @@ export async function GET() {
       };
     }),
   );
-  return Response.json({ wallet, families, ledger, reportHead: await chainHead() });
+  return Response.json({ wallet, families, ledger, reportHead: await chainHead(), llm: { active: configuredProviders(), warnings: providerWarnings() } });
 }

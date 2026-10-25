@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 type Hist = { id: string; version: number; status: string; heldout: number | null; visible: number | null; sha: string; stale?: boolean; rationale: string | null; gate: { passed: boolean; reasons: string[] } | null; code?: string; audit?: { status: "passed" | "failed"; reasons: string[] } | null };
 type Fam = { family: string; title: string; pillar: string; heldoutTotal: number; feedbackTotal: number; heldoutCommitment: string | null; auditCommitment?: string | null; crossCheck: { partner: string; total: number; commitment: string | null } | null; activeId: string; activeVersion: number; activeHeldout: number | null; history: Hist[] };
-type State = { wallet: { balance: number; held: number }; families: Fam[]; ledger: { id: number; kind: string; amount_micros: number; round_id: string | null; idem_key: string | null; note: string | null }[] };
+type State = { llm?: { active: string[]; warnings: string[] }; wallet: { balance: number; held: number }; families: Fam[]; ledger: { id: number; kind: string; amount_micros: number; round_id: string | null; idem_key: string | null; note: string | null }[] };
 type Ev = { type: string; [k: string]: any };
 
 const usd = (m: number) => `$${(m / 1_000_000).toFixed(3)}`;
@@ -257,6 +257,13 @@ export default function Home() {
           );
         })}
       </section>
+
+      {state?.llm && state.llm.warnings.length > 0 && (
+        <div role="alert" className="mt-4 rounded-lg border border-amber-400 bg-amber-50 p-3 text-xs text-amber-900 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-200">
+          <div className="font-medium">Model provider settings need attention (active now: {state.llm.active.join(", ") || "none"})</div>
+          <ul className="mt-1 list-disc pl-4">{state.llm.warnings.map((w) => <li key={w}>{w}</li>)}</ul>
+        </div>
+      )}
 
       <label className="mt-4 flex items-start gap-2 text-xs text-zinc-600 dark:text-zinc-300">
         <input type="checkbox" checked={cardHold} onChange={(e) => setCardHold(e.target.checked)} className="mt-0.5" />
