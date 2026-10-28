@@ -1,3 +1,4 @@
+import { connection } from "next/server";
 import { FAMILIES, FAMILY_LIST, PARTNER } from "@/lib/bench/cases";
 import { listAudits } from "@/lib/audit";
 import { chainHead } from "@/lib/chainStore";
@@ -6,6 +7,8 @@ import { ensureSchema, getActive, getHeldoutSet, getWallet, isStaleProposal, lis
 
 
 export async function GET() {
+  // Per request only: never read (or create tables in) the database while building.
+  await connection();
   await ensureSchema();
   const [wallet, ledger, audits] = await Promise.all([getWallet(), recentLedger(15), listAudits(60)]);
   const auditByTool = new Map(audits.map((a) => [a.tool_id, a])); // newest first, so the first per tool wins
