@@ -1,0 +1,35 @@
+name: CI
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --ignore-scripts
+      # The tests need no secrets: network and database paths are mocked, and the private held-out sets are skipped when absent.
+      - name: Tests
+        run: npm test
+        env:
+          CI: "true"
+      - name: Type check
+        run: npx next typegen && npx tsc --noEmit
+      # Needs no database or keys: the routes that read Neon are dynamic, so nothing is queried while building.
+      - name: Build
+        run: npm run build
+      # 40 lint errors exist today (mostly @ts-ignore and any in tests). Report them without blocking until they are fixed.
+      - name: Lint (report only for now)
+        run: npm run lint
+        continue-on-error: true
